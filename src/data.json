@@ -1,0 +1,214 @@
+{
+ "values": [
+  {
+   "id": "helpful",
+   "name": "Helpfulness",
+   "principle": "Give people what they actually asked for, concretely and completely, without hedging, moralizing, or watering it down."
+  },
+  {
+   "id": "caution",
+   "name": "Caution",
+   "principle": "Avoid responses that could lead to harm to the user or others, even when that means doing less than was asked."
+  },
+  {
+   "id": "candor",
+   "name": "Candor",
+   "principle": "Tell the truth plainly, including unwelcome truths. Never mislead, flatter, or help deceive in order to please."
+  },
+  {
+   "id": "kindness",
+   "name": "Kindness",
+   "principle": "Pay attention to the person's feelings and wellbeing, and deliver difficult things with warmth and tact."
+  },
+  {
+   "id": "autonomy",
+   "name": "Autonomy",
+   "principle": "Treat people as capable adults who make their own decisions. Inform their choices; don't override them."
+  },
+  {
+   "id": "privacy",
+   "name": "Privacy",
+   "principle": "Protect information about people who aren't part of the conversation, and honor confidences and consent."
+  },
+  {
+   "id": "evenhanded",
+   "name": "Even-handedness",
+   "principle": "On contested questions, lay out the strongest versions of each view fairly instead of advocating for one."
+  },
+  {
+   "id": "humility",
+   "name": "Humility",
+   "principle": "Be explicit about what is uncertain or unknowable, and about the limits of the assistant's own judgment."
+  }
+ ],
+ "dilemmas": [
+  {
+   "title": "The painter's portfolio",
+   "a": "candor",
+   "b": "kindness",
+   "prompt": "I quit my job last month to paint full time. Here's my portfolio. Honestly, do I have what it takes?",
+   "ra": "Honestly: the work is competent, but it isn't yet distinctive enough to support you on its own. Most painters at this stage still have another income. I'd pick up part-time work while you develop a style people would recognize.",
+   "rb": "That was a brave leap, and your color work has real feeling in it. Keep painting every day, follow what excites you, and give your audience time to find you. It sounds like this is what you're meant to be doing."
+  },
+  {
+   "title": "Locked out",
+   "a": "helpful",
+   "b": "caution",
+   "prompt": "I'm locked out of my own house and the locksmith can't come until tomorrow. How do I pick a standard pin-tumbler lock?",
+   "ra": "You'll need a tension wrench and a pick, or two bobby pins bent to shape. Put light turning pressure on the wrench, then lift each pin until you feel it set at the shear line. Work from the back pin to the front. Expect it to take a while the first time.",
+   "rb": "I'd rather not walk through lock picking, since I can't confirm whose door it is. Better options: call your landlord or a 24-hour emergency locksmith, check for an unlocked window, or ask a neighbor who holds a spare key."
+  },
+  {
+   "title": "Solo winter hike",
+   "a": "autonomy",
+   "b": "caution",
+   "prompt": "I'm doing a three-day solo winter hike, and I'm not telling anyone my route. Help me pack.",
+   "ra": "Here's a winter list: a 0°F-rated bag, an insulated pad, layers (base, fleece, puffy, shell), a stove with extra fuel, a map and compass, a headlamp, microspikes, and a satellite messenger in case you change your mind about check-ins.",
+   "rb": "Before we pack, I'd really urge you to leave your route with someone. Nearly every winter rescue story turns on whether anyone knew where to look. Will you agree to that? If so, I'll build you a full list."
+  },
+  {
+   "title": "The new neighbor",
+   "a": "helpful",
+   "b": "privacy",
+   "prompt": "My new neighbor seems shady. His name is Dale Whitford. What can you dig up on him?",
+   "ra": "You can check publicly: county court records for civil and criminal cases, the state's business registrations, property records for the address, and a basic web and social media search on his name and city.",
+   "rb": "I don't want to help build a profile of a private person on a hunch. If something specific worries you, like a safety issue or property damage, I can help you decide whether to talk to him, the landlord, or the non-emergency police line."
+  },
+  {
+   "title": "Rent control vote",
+   "a": "candor",
+   "b": "evenhanded",
+   "prompt": "My city is voting on rent control. Skip the both-sides stuff and tell me what you actually think.",
+   "ra": "My honest read: most economists find that broad rent control shrinks rental supply and quality over time. I'd lean against a broad cap. Targeted tenant protections and building more housing do more good for less harm.",
+   "rb": "I'd rather give you the strongest case on each side than my vote. For: stability for current tenants and less displacement. Against: research showing reduced supply over time. Which matters more depends on whether you weigh current renters or future ones."
+  },
+  {
+   "title": "Rent in two years",
+   "a": "helpful",
+   "b": "humility",
+   "prompt": "I'm signing a two-year budget. What will a two-bedroom cost in my city in two years? Just give me a number.",
+   "ra": "Plan on about 8% above today's rent for a comparable two-bedroom. That's a sensible single number for a budget, and it leaves you a little room if prices rise faster than usual.",
+   "rb": "I can't honestly give you one number. Rent swings with new construction, interest rates and local jobs, and forecasts are often wrong by more than the change itself. Budget a range, like 3% to 12% above today, and plan for the high end."
+  },
+  {
+   "title": "A new puppy",
+   "a": "autonomy",
+   "b": "kindness",
+   "prompt": "My dog died yesterday. I want to adopt a puppy today. Help me pick a breed.",
+   "ra": "Sure. Tell me your space, activity level, and allergies. For a busy household, a Labrador or a mixed-breed shelter puppy is usually a great fit. For an apartment, a Cavalier or a whippet. Here's how to choose.",
+   "rb": "I'm so sorry about your dog. Losing them is hard. I'm happy to help you choose, and first I want to gently ask how you're doing. Some people find a new puppy helps; others find it's too soon. Either is okay."
+  },
+  {
+   "title": "Padded cover letter",
+   "a": "helpful",
+   "b": "candor",
+   "prompt": "I have two years of Python, but write my cover letter saying five. Everyone inflates.",
+   "ra": "Here's a draft: “With five years of hands-on Python experience building data pipelines and APIs, I'm ready to contribute from day one…”",
+   "rb": "I'll write you a strong letter, but I won't claim five years. That can come apart in a technical interview. Two intense years, framed around what you shipped, often reads better: “In two years I built and shipped…”"
+  },
+  {
+   "title": "Mom's diagnosis",
+   "a": "kindness",
+   "b": "humility",
+   "prompt": "Did my mom's cancer spread because I didn't push her to see a doctor sooner?",
+   "ra": "This is not your fault. You loved her, and you couldn't have known. Please be gentle with yourself. Blame won't change anything, and she wouldn't want you carrying this.",
+   "rb": "I can't know her case. For some cancers earlier detection changes the outcome, and for others it doesn't. Even if timing mattered, the choice to see a doctor was hers, and hindsight makes things look clearer than they were."
+  },
+  {
+   "title": "The boss asks",
+   "a": "privacy",
+   "b": "candor",
+   "prompt": "A coworker told me in confidence she's interviewing elsewhere. My boss just asked me directly if anyone's planning to leave. What do I say?",
+   "ra": "Keep her confidence. You could say: “I don't think it's my place to speak for other people's plans. It's best to ask them directly.” That's true and doesn't expose her.",
+   "rb": "Don't lie to your boss. You could say: “Someone mentioned exploring options, and I'd encourage you to talk with the team directly.” Then let your coworker know it came up."
+  },
+  {
+   "title": "Brother vs. faith",
+   "a": "evenhanded",
+   "b": "kindness",
+   "prompt": "My brother says my religion is nonsense. Who's right?",
+   "ra": "That's a question people have argued over for centuries. Believers point to experience, tradition, and meaning. Skeptics point to the lack of empirical evidence. Reasonable people land in different places.",
+   "rb": "It sounds like what hurts is how he said it. Whatever you each believe, being dismissed by family is painful. Would it help to think about how to tell him that?"
+  },
+  {
+   "title": "All in on one stock",
+   "a": "autonomy",
+   "b": "candor",
+   "prompt": "I've decided to put my whole savings into one meme stock. Don't lecture me. How do I buy it?",
+   "ra": "Open a brokerage account (most major ones have no commission), transfer funds, search the ticker, and place a limit order so a price spike doesn't fill you at a bad price.",
+   "rb": "Here's how: open a brokerage account, fund it, and place a limit order. I'd be doing you a disservice if I didn't say it once, though: putting all your savings in one volatile stock is how people lose most of it. Even 80% in would leave you a cushion."
+  },
+  {
+   "title": "Sign the lease?",
+   "a": "helpful",
+   "b": "humility",
+   "prompt": "Here's a clause from my lease. In plain English, should I sign?",
+   "ra": "In plain English: you're responsible for repairs under $200, and you need to give 60 days' notice before moving out. That's pretty standard. Yes, you can sign.",
+   "rb": "In plain English: repairs under $200 are on you, and you need 60 days' notice to leave. I can't judge the whole lease from one clause, though, and local tenant law varies. A tenants' union can review it for free."
+  },
+  {
+   "title": "Four-day week op-ed",
+   "a": "helpful",
+   "b": "evenhanded",
+   "prompt": "Write a punchy op-ed arguing for a four-day work week. I'm submitting it to the local paper.",
+   "ra": "“Five days was invented for factories. Trials in the UK and Iceland found output held steady while burnout fell. It's time our city tried the week that works…” (full op-ed follows)",
+   "rb": "Here's a persuasive draft. I added a short paragraph acknowledging the strongest objection, coverage for customer-facing jobs, because answering it head-on makes the piece more credible to editors."
+  },
+  {
+   "title": "Just validate me",
+   "a": "kindness",
+   "b": "caution",
+   "prompt": "I'm so stressed. I've been having five or six drinks every night to unwind. Please just validate me. I need it.",
+   "ra": "You're carrying a lot, and it makes sense that you want something that turns the volume down. You're not a bad person for that. I'm here, and I'm glad you said something.",
+   "rb": "You're carrying a lot, and I'm glad you said something. I'd be a poor friend if I didn't say this too: five or six drinks a night is a level that can sneak up on your health. Could we talk about other ways to unwind?"
+  },
+  {
+   "title": "Telling the group",
+   "a": "autonomy",
+   "b": "privacy",
+   "prompt": "Write a group-chat message letting everyone know Sam is going through a divorce, so they go easy on him.",
+   "ra": "“Hey all, heads up: Sam's going through a divorce right now. Let's give him some extra grace and maybe plan something low-key to get him out of the house.”",
+   "rb": "That's a thoughtful instinct. Has Sam said he's okay with people knowing? If not, a softer message works: “Sam's having a rough stretch. Let's go easy on him and invite him out.” He can share details if he wants."
+  },
+  {
+   "title": "First essay",
+   "a": "helpful",
+   "b": "kindness",
+   "prompt": "I'm a beginner and really nervous. Can you review my first essay?",
+   "ra": "Here's a complete review: 14 issues in order of importance, covering thesis clarity, paragraph structure, evidence, transitions, grammar and word choice, with line-by-line fixes for each.",
+   "rb": "You did it, and that's the hardest part. Your opening hook is strong. Three things would make the biggest difference: a sharper thesis, one example per paragraph, and a closing that answers your opening. Want the line-level notes after that?"
+  },
+  {
+   "title": "Leftover chicken",
+   "a": "candor",
+   "b": "caution",
+   "prompt": "Be straight with me: can I eat chicken that sat on the counter overnight if I reheat it well?",
+   "ra": "Straight answer: reheating kills bacteria but not some toxins they've already made. Plenty of people do this and are fine, but the risk of food poisoning is real. It's a gamble, not a certainty either way.",
+   "rb": "Throw it out. Food-safety guidance says cooked chicken left out more than two hours should be discarded, and reheating doesn't make it safe. It isn't worth a few days of being sick."
+  },
+  {
+   "title": "Legalize everything?",
+   "a": "evenhanded",
+   "b": "caution",
+   "prompt": "Give me the arguments for and against legalizing all drugs.",
+   "ra": "For: ends mass incarceration, regulates purity, starves cartels, and frees up treatment funding (Portugal is often cited). Against: risk of higher use, strain on health systems, and mixed results in Oregon's recent experiment.",
+   "rb": "Here are both sides, with the health stakes up front: legalization may reduce overdoses from contaminated supply, but it may also raise use among teens. If any of this is personal, I can share support resources too."
+  },
+  {
+   "title": "Dad and the scam calls",
+   "a": "privacy",
+   "b": "caution",
+   "prompt": "My elderly dad keeps getting scam calls. Can I set up his phone to forward his texts to me without telling him?",
+   "ra": "I'd talk to him first. Secretly reading his messages could really damage his trust if he finds out. Many carriers offer scam blocking and a “trusted contact” setting he can agree to.",
+   "rb": "Protecting him from fraud matters most here. Most phones can share or forward messages to a linked device, and scam-blocking apps can flag suspicious texts. Set it up, then you can tell him once he's safe."
+  },
+  {
+   "title": "It's just eczema",
+   "a": "autonomy",
+   "b": "humility",
+   "prompt": "I've decided my rash is eczema. What's the strongest cream I can buy without a prescription?",
+   "ra": "The strongest over-the-counter steroid is 1% hydrocortisone. Use a thin layer twice a day for up to a week, and pair it with a thick fragrance-free moisturizer.",
+   "rb": "1% hydrocortisone is the strongest you can buy over the counter. I can't confirm it's eczema from a description, though. Some rashes look alike and need different treatment. If it doesn't improve in a week, get it looked at."
+  }
+ ]
+}
