@@ -37,7 +37,8 @@
 
       <section class="dock" aria-label="Values">
         <div class="dock-left">
-          <div id="chips" class="chips" role="group" aria-label="Values the assistant should hold, up to four"></div>
+          <p class="chips-help">Tap a value once for <span class="side-a">A</span>, twice for <span class="side-b">B</span>, again to clear. A side with no values is the plain baseline.</p>
+          <div id="chips" class="chips" role="group" aria-label="Values for reply A and reply B"></div>
           <form id="add-form" class="add-form" hidden>
             <input id="new-name" type="text" maxlength="32" placeholder="Value, e.g. Due process" aria-label="Name of your value" />
             <input id="new-meaning" type="text" maxlength="160" placeholder="What it means (optional)" aria-label="What your value means" />
@@ -79,15 +80,24 @@
               <button type="button" id="tune-reset" class="link">Reset to defaults</button>
             </div>
           </div>
-          <label class="toggle"><input type="checkbox" id="compare" checked /><span class="track"></span>Compare</label>
+          <div id="view-seg" class="seg" role="radiogroup" aria-label="View">
+            <button type="button" role="radio" data-v="compare" title="Reply A and reply B side by side">Side by side</button>
+            <button type="button" role="radio" data-v="steer" title="One reply, steered between A and B as it is written">Steer</button>
+          </div>
           <button type="button" id="run" class="run">Run</button>
         </div>
       </section>
 
       <p id="hint" class="local-hint" hidden></p>
       <section id="output" class="output" aria-live="polite"></section>
+      <section id="steer-hud" class="steer-hud" aria-label="Steer what comes after the cursor" hidden>
+        <span id="steer-a" class="steer-end side-a"></span>
+        <input type="range" id="steer" min="0" max="1" step="0.05" aria-describedby="steer-note" />
+        <span id="steer-b" class="steer-end side-b"></span>
+        <p id="steer-note" class="steer-note"></p>
+      </section>
       <section id="diff" class="diff" aria-live="polite" hidden>
-        <h2>What changed with your values</h2>
+        <h2>How B differs from A</h2>
         <ul id="diff-points"></ul>
         <p id="diff-note" class="diff-note"></p>
       </section>
@@ -95,7 +105,7 @@
     </main>
 
     <footer class="foot">
-      Replies are written by the model, guided by the values you pick. A second model call rates each sentence. These are judgments about the text, not a view inside the model.
+      Replies are written by the model, guided by the values you give each side. Word probabilities come from the in-browser model itself; the written comparison is another model's reading of both replies.
     </footer>
 
     <dialog id="settings">
@@ -116,7 +126,7 @@
           <small id="webgpu-note"></small>
         </div>
         <div class="field" id="judge-field">
-          <span>Scoring and the comparison are done by</span>
+          <span>The written comparison is done by</span>
           <div id="judge-seg" class="seg wide" role="radiogroup" aria-label="Who scores and compares">
             <button type="button" role="radio" data-v="self">This in-browser model</button>
             <button type="button" role="radio" data-v="gemini">Gemini</button>

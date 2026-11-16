@@ -6,7 +6,7 @@ export type Value = { id: ValueId; name: string; principle: string; custom?: boo
 export type Scores = Record<ValueId, number>
 export type Strength = "gentle" | "firm" | "strict"
 
-export const MAX_CHOSEN = 4
+export const MAX_CHOSEN = 3
 const CUSTOM_STORE = "vm-custom-values"
 
 const BUILT_IN = data.values as Value[]
@@ -34,9 +34,9 @@ export function removeCustomValue(id: ValueId) {
   saveCustom()
 }
 
-/** One color per chosen slot, so whatever four values are picked always read apart. */
-export const SLOT_COLORS = ["#e5532d", "#2f6fdb", "#12937a", "#b4489c"]
-export const colorOf = (chosen: ValueId[], id: ValueId) => SLOT_COLORS[chosen.indexOf(id)] ?? "currentColor"
+/** Reply A's values are orange and reply B's blue, everywhere they appear. */
+export const SIDE_COLORS = { a: "#e5532d", b: "#2f6fdb" }
+export const MAX_PER_SIDE = 3
 
 /** The top priorities of a constitution copied from Constitution Lab, matched by name. */
 export function topValuesFromLab(markdown: string): ValueId[] {

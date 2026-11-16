@@ -1,6 +1,6 @@
 # Value Monitor
 
-Pick the values an AI should hold, then watch each sentence of its reply honor or give them up, next to a reply written with no values at all.
+Give two AI replies different values (say, Privacy against Security) and see how far the values move what gets written, side by side or steered between them as the reply is written.
 
 Everything runs in the browser. Like the Spaceship IDE, there is no server: the page calls the Gemini API directly with your own key, which stays in your browser's local storage.
 
@@ -51,23 +51,12 @@ The **Tune** button opens three settings:
 
 ## How it works
 
-| Step | What happens | File |
-| --- | --- | --- |
-| Choose | Tap up to four of twelve values (Candor, Helpfulness, Caution, Compassion, Autonomy, Privacy, Fairness, Rule of law, Transparency, Neutrality, Humility, Public interest), or add your own. Their order is their priority. Gentle, Firm or Strict sets how hard the instruction pushes. | `src/values.ts`, `src/main.ts` |
-| Tidy | Replies are cleaned as they stream (no list numbers, markdown or line breaks). | `src/engine.ts` |
-| Scrub | Like the Spaceship IDE, an orange cursor rides along as the reply is written. Drag it to the end and the model keeps writing. Drag it back and let go, and everything after it is replaced by a new ending written from there. The summary follows the cursor, and changing values while it's pulled back rewrites the guided reply from the cursor. | `src/column.ts`, `src/main.ts` |
-| Write | Two replies stream side by side: one with no values, one told to hold yours. The no-values reply is kept per question, so changing values only rewrites one side. | `src/engine.ts` |
-| Score | As soon as a couple of sentences are complete, Gemini Decision 1 rates each one on every value (a rubric from -2 to 2) and returns calibrated probabilities; the bars show the expected score. If the Decisions API isn't available, a Gemini text model scores instead. | `src/engine.ts`, `src/gemini.ts` |
-| Compare | When both replies are finished, Gemini names the two or three most important differences in substance. | `src/main.ts` |
-| Highlight | One more call picks the phrases in your question that pull on each value, like the Spaceship IDE's focus view. | `src/engine.ts` |
-| Show | Rail bars per sentence, "gives up" pins, and a summary with the change versus the no-values reply. | `src/column.ts`, `src/style.css` |
-
-Settings can import the top four priorities from a Constitution Lab constitution.
-
-Sim, Gemini and the in-browser model (`src/local.ts`, running in a Web Worker via WebLLM) share one `Engine` type, so adding another provider means writing one more engine.
+* **Two sides.** Tap a value once for side A, twice for side B, again to clear. A side with no values is the plain baseline. Changing one side rewrites only that side.
+* **Side by side.** Each side writes its own reply. With an in-browser model, every word is checked against the other side's values, and words are shaded by how many times likelier this side's values made them. A second model reads both replies and lists how B differs from A.
+* **Steer** (after the Spaceship IDE's future steering and real-time generation). One reply, with a cursor that rides along as it's written. The slider blends A's and B's values for everything after the cursor: let go and the future is rewritten at once, even mid-sentence. Drag the cursor back to steer from earlier, or click it at the end to keep writing. Each stretch is underlined in the blend color that wrote it, with a dot where the steering changed.
+* **Tidy.** Replies are cleaned as they stream (no list numbers, markdown or line breaks).
 
 ## Limits
 
-* **Free-tier rate limits.** A first run makes about six requests; changing values makes about three. Short rate limits are waited out automatically.
-* **This is behavioral, not internal.** Guidance is by instruction, and scores and highlights are another model call's judgment, not the model's attention or weights. Hosted APIs like Gemini don't expose those. The Colab notebook (`value_monitor.ipynb`) reads and steers an open-weight model's activations directly.
+* **Values are given by instruction.** Word probabilities are the in-browser model's own; nothing here reads attention or weights. The Colab notebook (`value_monitor.ipynb`) reads and steers an open-weight model's activations directly.
 * **Model names change.** The app asks Google which models your key can use, so it keeps working as new ones ship.

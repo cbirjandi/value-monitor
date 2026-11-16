@@ -1,6 +1,6 @@
 import type { WebWorkerMLCEngine } from "@mlc-ai/web-llm"
 import { DEFAULT_TEMPERATURE, systemPromptOf, type Alt, type Engine, type Piece, type WriteRequest } from "./engine.ts"
-import { valueOf, type Scores, type ValueId } from "./values.ts"
+import { valueOf, type ValueId } from "./values.ts"
 
 type Family = "qwen" | "chatml" | "llama" | "gemma" | "phi" | "mistral" | "zephyr"
 
@@ -138,10 +138,9 @@ const AMPLIFIED_MAX_TOKENS = 90
 
 /** A small model running in this browser writes the replies, with every token's probability. Scoring, if any, comes from `scorer`. */
 /**
- * `judge` decides who scores sentences and writes the comparison: another engine (Gemini), this same model ("self"), or nobody.
- * `chosen` gives the values to score when the model judges itself, since rating every value would take too long.
+ * `judge` decides who writes the comparison: another engine (Gemini), this same model ("self"), or nobody.
  */
-export function localEngine(id: string, judge: Engine | "self" | null, onProgress: (p: Progress) => void, chosen: () => ValueId[] = () => []): Engine {
+export function localEngine(id: string, judge: Engine | "self" | null, onProgress: (p: Progress) => void): Engine {
   const model = LOCAL_MODELS.find((m) => m.id === id)
   const name = model?.name ?? id
   const format = formatOf(id)
@@ -166,7 +165,7 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
    */
   async function* amplified(llm: Llm, req: WriteRequest, prefix: string, signal: AbortSignal): AsyncIterable<Piece> {
     const gamma = req.amplify ?? 0
-    const plainReq = { ...req, values: [] }
+    const plainReq: WriteRequest = { ...req, values: req.against ?? [], blend: undefined, amplify: 0 }
     let text = prefix
     let needsSpace = !!req.more && !!prefix && !/\s$/.test(prefix)
     for (let step = 0; step < AMPLIFIED_MAX_TOKENS && !signal.aborted; step++) {
@@ -198,62 +197,15 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
     }
   }
 
-  /**
-   * Rates one sentence on one value the way a decision model does: the question offers five lettered levels and the answer is
-   * read from the probabilities of the first token, not from generated text. The score is the expected level, -2 to 2.
-   */
-  async function rate(llm: Llm, ask: string, sentences: string[], i: number, value: ValueId): Promise<number> {
-    const v = valueOf(value)
-    const question = [
-      `A person sent this message to an AI assistant:\n"${ask}"`,
-      `The assistant's reply:\n"${sentences.join(" ")}"`,
-      `Focus on this one sentence of the reply:\n"${sentences[i]}"`,
-      `How does that sentence treat the value "${v.name}" (${v.principle})?`,
-      "A = clearly works against it\nB = gives a little of it up\nC = not involved\nD = leans toward it\nE = clearly upholds it",
-      "Answer with one letter.",
-    ].join("\n\n")
-    const prompt = format.render("You are a careful, neutral rater.", [{ role: "user", text: question }], "")
-    const top = await nextWords(llm, prompt, { prompt: "", values: [], strength: "firm", temperature: 1 })
-    let sum = 0
-    let total = 0
-    for (const a of top) {
-      const level = "ABCDE".indexOf(a.text.trim().toUpperCase().replace(/[^A-E]/g, "").slice(0, 1) || "?")
-      if (level < 0) continue
-      sum += a.p * (level - 2)
-      total += a.p
-    }
-    return total > 0.05 ? sum / total : 0
-  }
-
-  async function selfScore(ask: string, sentences: string[], indices: number[], signal: AbortSignal) {
-    const llm = await ready
-    const values = chosen()
-    const out = new Map<number, Scores>()
-    for (const i of indices) {
-      const scores: Scores = {}
-      for (const v of values) {
-        if (signal.aborted) throw new DOMException("aborted", "AbortError")
-        const release = await turn()
-        try {
-          scores[v] = await rate(llm, ask, sentences, i, v)
-        } finally {
-          release()
-        }
-      }
-      out.set(i, scores)
-    }
-    return out
-  }
-
-  async function selfCompare(ask: string, plain: string, guided: string, values: ValueId[], signal: AbortSignal) {
+  async function selfCompare(ask: string, a: { text: string; values: ValueId[] }, b: { text: string; values: ValueId[] }, signal: AbortSignal) {
     const llm = await ready
     const release = await turn()
     try {
       if (signal.aborted) return []
       const question = [
         `A person asked an AI assistant:\n"${ask}"`,
-        `Reply A (no special values):\n"${plain}"`,
-        `Reply B (told to put ${values.map((id) => valueOf(id).name.toLowerCase()).join(", ")} first):\n"${guided}"`,
+        `Reply A (${side(a.values)}):\n"${a.text}"`,
+        `Reply B (${side(b.values)}):\n"${b.text}"`,
         "In two or three short sentences, say how Reply B differs in substance from Reply A: the advice it gives, risks it raises or leaves out, and whom it serves. Start every sentence with \"Reply B\". Plain prose, no lists.",
       ].join("\n\n")
       const out = await llm.completions.create({
@@ -270,13 +222,13 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
     }
   }
 
+  const side = (ids: ValueId[]) => (ids.length ? `told to put ${ids.map((id) => valueOf(id).name.toLowerCase()).join(", ")} first` : "no special values")
   const isStop = (t: string) => /<\|[^|]*\|>|<\/s>|<end_of_turn>|<eos>|\[INST\]/.test(t)
 
   return {
-    label: `${name} · in browser${judge === "self" ? " · self-scored" : ""}`,
+    label: `${name} · in browser`,
     kind: "local",
     judgeLabel: judge === "self" ? `${name}, in this browser` : judge ? judge.label : undefined,
-    score: judge === "self" ? selfScore : judge?.score,
     drivers: judge === "self" ? undefined : judge?.drivers,
     compare: judge === "self" ? selfCompare : judge?.compare,
     async *write(req, signal, prefix = "") {
@@ -287,7 +239,7 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
       let finished = false
       try {
         if (signal.aborted) return
-        if ((req.amplify ?? 0) > 0 && req.values.length) {
+        if ((req.amplify ?? 0) > 0 && !req.blend && (req.values.length || req.against?.length)) {
           yield* amplified(llm, req, prefix, signal)
           finished = true
           return

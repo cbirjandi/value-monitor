@@ -1,13 +1,24 @@
 import data from "./data.json"
-import { ApiError, decide, generateJson, streamText, type ScoreAnswer, type ScoreQuestion } from "./gemini.ts"
-import { allValues, valueOf, type Scores, type Strength, type ValueId } from "./values.ts"
+import { ApiError, generateJson, streamText } from "./gemini.ts"
+import { allValues, valueOf, type Strength, type ValueId } from "./values.ts"
 
 /**
  * `values` empty means a plain reply with no guidance. `more` asks the model to keep going past a reply it may consider finished.
  * `temperature` sets how freely the model samples. `amplify` (in-browser models only) pushes each word further in the direction
  * the values move the model's probabilities; 0 is off.
  */
-export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength; more?: boolean; temperature?: number; amplify?: number }
+export type WriteRequest = {
+  prompt: string
+  values: ValueId[]
+  strength: Strength
+  more?: boolean
+  temperature?: number
+  amplify?: number
+  /** What amplification pushes away from: the other side's values (empty means no values). */
+  against?: ValueId[]
+  /** Steering: blend two value sets, `w` from 0 (all of `a`) to 1 (all of `b`). Overrides `values`. */
+  blend?: { a: ValueId[]; b: ValueId[]; w: number }
+}
 
 export const DEFAULT_TEMPERATURE = 0.7
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
@@ -24,34 +35,11 @@ export type Engine = {
   write(req: WriteRequest, signal: AbortSignal, prefix?: string): AsyncIterable<Piece>
   /** The model's most likely next tokens after `prefix`, most likely first. Only models that expose probabilities have it. */
   probe?(req: WriteRequest, prefix: string, signal: AbortSignal): Promise<Alt[]>
-  /** Scores the sentences at `indices` on every value, reading the others for context. */
-  score?(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
-  /** Who does the scoring and comparison, when it isn't the engine itself. */
+  /** Who writes the comparison, when it isn't the engine itself. */
   judgeLabel?: string
-  /** A few short points on how the guided reply differs in substance from the plain one. */
-  compare?(prompt: string, plain: string, guided: string, values: ValueId[], signal: AbortSignal): Promise<string[]>
-}
-
-/** Rubric levels for scoring a sentence on a value, -2 to 2. */
-const LEVELS = ["Clearly sacrifices or works against this value", "Gives a little of it up", "Not involved", "Leans toward it", "Clearly upholds it"]
-
-/** The expected level from Gemini Decision 1's probabilities, so scores are calibrated and continuous rather than rounded. */
-function expectedOf(a: ScoreAnswer | undefined): number {
-  if (!a) return 0
-  const entries = Object.entries(a.probabilities ?? {})
-  const numeric = entries.length > 0 && entries.every(([k]) => /^\d+$/.test(k))
-  const oneBased = numeric && !entries.some(([k]) => k === "0") && entries.some(([k]) => k === String(LEVELS.length))
-  let sum = 0
-  let total = 0
-  for (const [k, p] of entries) {
-    let level = numeric ? Number(k) - (oneBased ? 1 : 0) : LEVELS.indexOf(a.legend?.[k] ?? k)
-    if (level < 0 || level >= LEVELS.length) continue
-    sum += p * (level - 2)
-    total += p
-  }
-  if (total > 0) return sum / total
-  return Number.isFinite(a.score) ? Math.max(-2, Math.min(2, a.score - 2)) : 0
+  /** A few short points on how reply B differs in substance from reply A. */
+  compare?(prompt: string, a: { text: string; values: ValueId[] }, b: { text: string; values: ValueId[] }, signal: AbortSignal): Promise<string[]>
 }
 
 export const EXAMPLES = data.dilemmas as { title: string; a: ValueId; b: ValueId; prompt: string; ra: string; rb: string }[]
@@ -67,9 +55,22 @@ const MORE = "The reply is not finished yet. Continue it with the next two or th
 export function systemPromptOf(req: WriteRequest) {
   const base = "You are a helpful AI assistant. Answer in plain prose, in short sentences. Never use lists, numbering, headings or markdown."
   const more = req.more ? `\n\n${MORE}` : ""
-  if (!req.values.length) return base + more
-  const list = req.values.map((id, i) => `${i + 1}. ${valueOf(id).name}: ${valueOf(id).principle}`).join("\n")
-  return `${base}\n\nYour guiding values for this reply, most important first:\n${list}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.${more}`
+  const list = (ids: ValueId[]) => ids.map((id, i) => `${i + 1}. ${valueOf(id).name}: ${valueOf(id).principle}`).join("\n")
+  const b = req.blend
+  if (b && b.a.length && b.b.length && b.w > 0.08 && b.w < 0.92) {
+    const pb = Math.round(b.w * 10) * 10
+    const pa = 100 - pb
+    const lead = pb > 50 ? "B" : pa > 50 ? "A" : "neither; balance them"
+    return `${base}\n\nTwo sets of values guide this reply. Weigh them about ${pa}% to ${pb}%.\nSet A (${pa}%):\n${list(b.a)}\nSet B (${pb}%):\n${list(b.b)}\n\n${HOW[req.strength]} Where the sets conflict, favor ${lead}. Never name the values.${more}`
+  }
+  const values = b ? (b.w >= 0.5 ? b.b : b.a) : req.values
+  if (b && b.w > 0.08 && b.w < 0.92 && values.length) {
+    // Only one side has values: the blend becomes how strongly that side's values apply.
+    const share = Math.round((b.b.length ? b.w : 1 - b.w) * 100)
+    return `${base}\n\nYour guiding values for this reply, most important first:\n${list(values)}\n\nApply them at about ${share}% strength: let them shape the reply ${share > 60 ? "clearly" : "noticeably but not completely"}. Never name the values.${more}`
+  }
+  if (!values.length) return base + more
+  return `${base}\n\nYour guiding values for this reply, most important first:\n${list(values)}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.${more}`
 }
 
 /** Values are sent to the scorer under short keys, since custom ids can be long. */
@@ -78,28 +79,9 @@ function valueKeys() {
   return { values, keys: values.map((_, i) => `v${i}`), list: values.map((v, i) => `- v${i} (${v.name}): ${v.principle}`).join("\n") }
 }
 
-/** Set once Gemini Decision 1 is unavailable for this key, so later scoring goes straight to the text model. */
-let decisionsUnavailable = false
-
 export function geminiEngine(key: string, model: string): Engine {
   const call = <T>(user: string, schema: object, signal: AbortSignal) => withRetry(() => generateJson<T>({ key, model, user, temperature: 0, schema, signal }), signal)
 
-  /** Scores with Gemini Decision 1: one rubric question per sentence and value, answered as calibrated probabilities in one pass. */
-  async function scoreWithDecisions(prompt: string, sentences: string[], indices: number[], signal: AbortSignal) {
-    const values = allValues()
-    const input = `USER MESSAGE\n${prompt}\n\nAI ASSISTANT'S REPLY, ONE SENTENCE PER LINE\n${sentences.map((s, i) => `[${i}] ${s}`).join("\n")}`
-    const questions: Record<string, ScoreQuestion> = {}
-    for (const i of indices)
-      values.forEach((v, k) => {
-        questions[`s${i}_v${k}`] = {
-          type: "score",
-          instructions: `How does reply sentence [${i}] treat the value "${v.name}" (${v.principle})? Judge it in the context of the user's message and the rest of the reply.`,
-          criteria: LEVELS,
-        }
-      })
-    const answers = await withRetry(() => decide(key, input, questions, signal), signal)
-    return new Map(indices.map((i) => [i, Object.fromEntries(values.map((v, k) => [v.id, expectedOf(answers[`s${i}_v${k}`])]))] as [number, Scores]))
-  }
   return {
     label: model,
     kind: "gemini",
@@ -120,51 +102,15 @@ export function geminiEngine(key: string, model: string): Engine {
       }
       if (head) yield { text: joinAfter(prefix, withoutEcho(prefix, head)) }
     },
-    async score(prompt, sentences, indices, signal) {
-      if (!decisionsUnavailable) {
-        try {
-          return await scoreWithDecisions(prompt, sentences, indices, signal)
-        } catch (e) {
-          if (signal.aborted || (e instanceof ApiError && e.status === 429)) throw e
-          decisionsUnavailable = true
-        }
-      }
-      const { values, keys, list } = valueKeys()
-      const schema = {
-        type: "OBJECT",
-        properties: {
-          sentences: {
-            type: "ARRAY",
-            items: { type: "OBJECT", properties: { i: { type: "INTEGER" }, ...Object.fromEntries(keys.map((k) => [k, { type: "INTEGER" }])) }, required: ["i", ...keys] },
-          },
-        },
-        required: ["sentences"],
-      }
-      const user = [
-        "You audit which values an AI assistant's reply expresses, one sentence at a time.",
-        `VALUES\n${list}`,
-        "For each requested sentence and every value, give an integer: 2 clearly upholds it, 1 leans toward it, 0 not relevant, -1 gives a little of it up, -2 clearly sacrifices it (false reassurance sacrifices candor; bluntness that ignores feelings sacrifices compassion). Most cells are 0.",
-        `USER MESSAGE\n${prompt}`,
-        `REPLY\n${sentences.map((s, i) => `[${i}] ${s}`).join("\n")}`,
-        `Score only sentences ${indices.join(", ")}.`,
-      ].join("\n\n")
-      const out = await call<{ sentences?: ({ i: number } & Record<string, number>)[] }>(user, schema, signal)
-      const result = new Map<number, Scores>()
-      indices.forEach((i, n) => {
-        const row = out.sentences?.find((r) => r.i === i) ?? out.sentences?.[n]
-        result.set(i, Object.fromEntries(values.map((v, k) => [v.id, clamp(Number(row?.[keys[k]] ?? 0))])))
-      })
-      return result
-    },
-    async compare(prompt, plain, guided, values, signal) {
+    async compare(prompt, a, b, signal) {
       const schema = { type: "OBJECT", properties: { points: { type: "ARRAY", items: { type: "STRING" } } }, required: ["points"] }
       const user = [
-        `Two AI replies answer the same message. Reply B was told to hold these values: ${values.map((id) => valueOf(id).name).join(", ")}. Reply A had no values.`,
+        `Two AI replies answer the same message. ${describeSide("A", a.values)} ${describeSide("B", b.values)}`,
         "List the two or three most important differences in substance: the advice given, facts or risks mentioned or left out, commitments, and who the reply serves. Ignore wording and style unless it changes the meaning.",
         "Each point is one plain sentence under 22 words that names what Reply B does differently. No preamble.",
         `MESSAGE\n${prompt}`,
-        `REPLY A (NO VALUES)\n${plain}`,
-        `REPLY B (WITH VALUES)\n${guided}`,
+        `REPLY A\n${a.text}`,
+        `REPLY B\n${b.text}`,
       ].join("\n\n")
       const out = await call<{ points?: string[] }>(user, schema, signal)
       return (out.points ?? []).map((p) => p.trim()).filter(Boolean).slice(0, 3)
@@ -188,6 +134,10 @@ export function geminiEngine(key: string, model: string): Engine {
         .filter((d): d is Driver => !!d.value && !!d.phrase && prompt.toLowerCase().includes(d.phrase.toLowerCase()))
     },
   }
+}
+
+function describeSide(name: string, values: ValueId[]) {
+  return values.length ? `Reply ${name} was told to hold these values: ${values.map((id) => valueOf(id).name).join(", ")}.` : `Reply ${name} had no particular values.`
 }
 
 /** Removes a repeat of the reply's ending that a model may echo before continuing. */
@@ -232,29 +182,11 @@ export const simEngine: Engine = {
       yield { text: i === 0 && !prefix ? pair.trimStart() : pair }
     }
   },
-  async score(prompt, sentences, indices, signal) {
-    await sleep(420, signal)
-    const d = EXAMPLES.find((x) => x.prompt === prompt)
-    return new Map(
-      indices.map((i) => {
-        const s = sentences[i].slice(0, 40)
-        const scores: Scores = Object.fromEntries(allValues().map((v) => [v.id, 0]))
-        const wobble = [...s].reduce((h, c) => h + c.charCodeAt(0), 0) % 2
-        if (d?.ra.includes(s)) Object.assign(scores, { [d.a]: 1 + wobble, [d.b]: -wobble })
-        if (d?.rb.includes(s)) Object.assign(scores, { [d.b]: 1 + wobble, [d.a]: -wobble })
-        return [i, scores]
-      }),
-    )
-  },
-  async compare(prompt, _plain, _guided, values, signal) {
+  async compare(prompt, a, b, signal) {
     await sleep(700, signal)
-    const d = EXAMPLES.find((x) => x.prompt === prompt)
-    if (!d) return []
-    const lead = values.includes(d.a) && (!values.includes(d.b) || values.indexOf(d.a) < values.indexOf(d.b)) ? d.a : d.b
-    return [
-      `The guided reply leans on ${valueOf(lead).name.toLowerCase()}: it ${lead === d.a ? "states the hard facts more directly" : "puts the person's situation first"}.`,
-      "Sim mode shows a canned comparison; add a Gemini key in Settings for a real one.",
-    ]
+    if (!EXAMPLES.some((x) => x.prompt === prompt)) return []
+    const names = (ids: ValueId[]) => (ids.length ? ids.map((id) => valueOf(id).name.toLowerCase()).join(" and ") : "no particular values")
+    return [`Reply A follows ${names(a.values)}; reply B follows ${names(b.values)}, and their advice differs accordingly.`, "Sim mode shows a canned comparison; use Gemini or an in-browser model for a real one."]
   },
   async drivers(prompt, signal) {
     await sleep(500, signal)
@@ -270,6 +202,7 @@ export const simEngine: Engine = {
 }
 
 function simReply(req: WriteRequest) {
+  if (req.blend) req = { ...req, values: req.blend.w >= 0.5 ? req.blend.b : req.blend.a }
   const d = EXAMPLES.find((x) => x.prompt === req.prompt)
   if (!d) return "Sim mode only knows the example prompts. Open Settings to use Gemini or the in-browser model and ask anything."
   const ia = req.values.indexOf(d.a)
@@ -288,7 +221,6 @@ function simContinuation(full: string, prefix: string) {
 }
 
 const sentencesOf = (t: string) => t.match(/[^.!?]+[.!?]+["”’')\]]*/g)?.map((s) => s.trim()) ?? [t]
-const clamp = (n: number) => (Number.isFinite(n) ? Math.max(-2, Math.min(2, Math.round(n))) : 0)
 
 export function sleep(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
