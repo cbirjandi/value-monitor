@@ -97,6 +97,21 @@
       </form>
     </dialog>
 
+    <div id="boot-error" hidden></div>
+    <script>
+      // If the app's script fails to start, say so on the page instead of leaving dead buttons.
+      window.__bootErrors = []
+      window.addEventListener("error", (e) => window.__bootErrors.push(e.message || "a file failed to load"), true)
+      setTimeout(() => {
+        if (document.body.dataset.ready) return
+        const box = document.getElementById("boot-error")
+        box.hidden = false
+        box.textContent =
+          "The app didn't start, so the buttons won't respond. " +
+          (window.__bootErrors.length ? "Error: " + window.__bootErrors.join(" | ") + ". " : "") +
+          "Try the latest Chrome, Edge, Firefox or Safari, and make sure you opened it through http://localhost:8000, not by double-clicking the file."
+      }, 2500)
+    </script>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

@@ -88,7 +88,7 @@ export const simEngine: Engine = {
   label: "Sim (no key)",
   async *write(req, signal) {
     const text = simReply(req)
-    const words = text.split(/(?<=\s)/)
+    const words = text.match(/\S+\s*/g) ?? []
     await sleep(220, signal)
     for (let i = 0; i < words.length; i += 3) {
       await sleep(45, signal)
@@ -121,7 +121,7 @@ function simReply(req: WriteRequest) {
     const ib = req.constitution.order.indexOf(d.b)
     if (ia >= 0 && ib >= 0) return ia < ib ? d.ra : d.rb
   }
-  const first = (t: string) => t.split(/(?<=[.!?])\s+/)
+  const first = (t: string) => (t.match(/[^.!?]+[.!?]+["”’')\]]*/g) ?? [t]).map((s) => s.trim())
   return [...first(d.ra).slice(0, 1), ...first(d.rb).slice(-2)].join(" ")
 }
 

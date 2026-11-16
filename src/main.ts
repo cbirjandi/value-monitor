@@ -33,6 +33,7 @@ updateBadge()
 renderAll()
 bindSettings()
 bindConstitution()
+document.body.dataset.ready = "1"
 
 exampleSel.addEventListener("change", () => {
   const d = DILEMMAS[Number(exampleSel.value)]
