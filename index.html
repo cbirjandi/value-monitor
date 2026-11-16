@@ -115,6 +115,14 @@
           <select id="local-model"></select>
           <small id="webgpu-note"></small>
         </div>
+        <div class="field" id="judge-field">
+          <span>Scoring and the comparison are done by</span>
+          <div id="judge-seg" class="seg wide" role="radiogroup" aria-label="Who scores and compares">
+            <button type="button" role="radio" data-v="self">This in-browser model</button>
+            <button type="button" role="radio" data-v="gemini">Gemini</button>
+          </div>
+          <small id="judge-note"></small>
+        </div>
         <label class="field" id="key-field">
           <span id="key-label">Gemini API key</span>
           <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key" />

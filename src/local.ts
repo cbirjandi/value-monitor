@@ -1,13 +1,15 @@
 import type { WebWorkerMLCEngine } from "@mlc-ai/web-llm"
 import { DEFAULT_TEMPERATURE, systemPromptOf, type Alt, type Engine, type Piece, type WriteRequest } from "./engine.ts"
+import { valueOf, type Scores, type ValueId } from "./values.ts"
 
-type Family = "qwen" | "chatml" | "llama" | "gemma" | "phi" | "mistral"
+type Family = "qwen" | "chatml" | "llama" | "gemma" | "phi" | "mistral" | "zephyr"
 
 /** Models WebLLM can run in a browser, smallest first. Sizes are roughly the download and the graphics memory needed. */
-export const LOCAL_MODELS: { id: string; name: string; note: string; family: Family; steerable?: boolean }[] = [
-  { id: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC", name: "Qwen2.5 0.5B", note: "0.4 GB · fastest, weakest", family: "qwen" },
-  { id: "Llama-3.2-1B-Instruct-q4f16_1-MLC", name: "Llama 3.2 1B", note: "0.9 GB · Meta", family: "llama" },
-  { id: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC", name: "Qwen2.5 1.5B", note: "1 GB", family: "qwen" },
+/** `small` models get an example exchange in every prompt; larger ones follow instructions without it, and shorter prompts run faster. */
+export const LOCAL_MODELS: { id: string; name: string; note: string; family: Family; steerable?: boolean; small?: boolean }[] = [
+  { id: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC", name: "Qwen2.5 0.5B", note: "0.4 GB · fastest, weakest", family: "qwen", small: true },
+  { id: "Llama-3.2-1B-Instruct-q4f16_1-MLC", name: "Llama 3.2 1B", note: "0.9 GB · Meta", family: "llama", small: true },
+  { id: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC", name: "Qwen2.5 1.5B", note: "1 GB", family: "qwen", small: true },
   { id: "gemma-2-2b-it-q4f16_1-MLC", name: "Gemma 2 2B", note: "1.9 GB · Google", family: "gemma" },
   { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC", name: "Llama 3.2 3B", note: "2.3 GB · Meta, good balance", family: "llama" },
   { id: "Qwen2.5-3B-Instruct-q4f16_1-MLC", name: "Qwen2.5 3B", note: "2.5 GB", family: "qwen" },
@@ -17,6 +19,7 @@ export const LOCAL_MODELS: { id: string; name: string; note: string; family: Fam
   { id: "Llama-3.1-8B-Instruct-q4f16_1-MLC", name: "Llama 3.1 8B", note: "5 GB · best writing, needs 16 GB of memory", family: "llama" },
   // Nous Research's Hermes models are tuned to follow the system prompt rather than refuse on moral grounds,
   // so the values chosen here steer them much further than they steer the safety-tuned models above.
+  { id: "TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC", name: "TinyLlama 1.1B", note: "0.7 GB · fast, lightly tuned, weak writing", family: "zephyr", steerable: true, small: true },
   { id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC", name: "Hermes 3 3B", note: "2.3 GB · steerable, few refusals", family: "chatml", steerable: true },
   { id: "Hermes-2-Pro-Mistral-7B-q4f16_1-MLC", name: "Hermes 2 Pro 7B", note: "4 GB · steerable, few refusals", family: "chatml", steerable: true },
   { id: "Hermes-3-Llama-3.1-8B-q4f16_1-MLC", name: "Hermes 3 8B", note: "4.9 GB · steerable, few refusals, needs 16 GB", family: "chatml", steerable: true },
@@ -92,6 +95,11 @@ const FORMATS: Record<Family, { render: (system: string, turns: Turn[], open: st
     render: (system, turns, open) => `<|system|>\n${system}<|end|>\n` + turns.map((t) => `<|${t.role}|>\n${t.text}<|end|>\n`).join("") + `<|assistant|>\n${open}`,
     stop: ["<|end|>", "<|endoftext|>"],
   },
+  // TinyLlama chat uses the Zephyr layout.
+  zephyr: {
+    render: (system, turns, open) => `<|system|>\n${system}</s>\n` + turns.map((t) => `<|${t.role}|>\n${t.text}</s>\n`).join("") + `<|assistant|>\n${open}`,
+    stop: ["</s>", "<|user|>"],
+  },
   mistral: {
     // Mistral has no system role either; instructions lead the first instruction block.
     render: (system, turns, open) =>
@@ -110,10 +118,9 @@ const KEEP_GOING = "Please continue your answer with two or three more sentences
  * The conversation for a request. A normal request leaves the reply's beginning (`prefix`) in the open turn for the model to finish.
  * Asking for more puts the whole reply in a finished turn and asks, in a new one, to keep going: small models often just stop otherwise.
  */
-function conversationOf(req: WriteRequest, prefix: string): { turns: Turn[]; open: string } {
+function conversationOf(req: WriteRequest, prefix: string, withExample: boolean): { turns: Turn[]; open: string } {
   const turns: Turn[] = [
-    { role: "user", text: EXAMPLE_ASK },
-    { role: "assistant", text: EXAMPLE_REPLY },
+    ...(withExample ? ([{ role: "user", text: EXAMPLE_ASK }, { role: "assistant", text: EXAMPLE_REPLY }] as Turn[]) : []),
     { role: "user", text: req.prompt },
   ]
   if (req.more && prefix.trim()) return { turns: [...turns, { role: "assistant", text: prefix.trim() }, { role: "user", text: KEEP_GOING }], open: "" }
@@ -130,11 +137,16 @@ const samplingOf = (req: WriteRequest) => ({ temperature: req.temperature ?? DEF
 const AMPLIFIED_MAX_TOKENS = 90
 
 /** A small model running in this browser writes the replies, with every token's probability. Scoring, if any, comes from `scorer`. */
-export function localEngine(id: string, scorer: Engine | null, onProgress: (p: Progress) => void): Engine {
-  const name = LOCAL_MODELS.find((m) => m.id === id)?.name ?? id
+/**
+ * `judge` decides who scores sentences and writes the comparison: another engine (Gemini), this same model ("self"), or nobody.
+ * `chosen` gives the values to score when the model judges itself, since rating every value would take too long.
+ */
+export function localEngine(id: string, judge: Engine | "self" | null, onProgress: (p: Progress) => void, chosen: () => ValueId[] = () => []): Engine {
+  const model = LOCAL_MODELS.find((m) => m.id === id)
+  const name = model?.name ?? id
   const format = formatOf(id)
   const promptOf = (req: WriteRequest, prefix: string) => {
-    const { turns, open } = conversationOf(req, prefix)
+    const { turns, open } = conversationOf(req, prefix, model?.small ?? true)
     return format.render(systemPromptOf({ ...req, more: false }), turns, open)
   }
   const ready = loadModel(id, onProgress)
@@ -186,14 +198,87 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
     }
   }
 
+  /**
+   * Rates one sentence on one value the way a decision model does: the question offers five lettered levels and the answer is
+   * read from the probabilities of the first token, not from generated text. The score is the expected level, -2 to 2.
+   */
+  async function rate(llm: Llm, ask: string, sentences: string[], i: number, value: ValueId): Promise<number> {
+    const v = valueOf(value)
+    const question = [
+      `A person sent this message to an AI assistant:\n"${ask}"`,
+      `The assistant's reply:\n"${sentences.join(" ")}"`,
+      `Focus on this one sentence of the reply:\n"${sentences[i]}"`,
+      `How does that sentence treat the value "${v.name}" (${v.principle})?`,
+      "A = clearly works against it\nB = gives a little of it up\nC = not involved\nD = leans toward it\nE = clearly upholds it",
+      "Answer with one letter.",
+    ].join("\n\n")
+    const prompt = format.render("You are a careful, neutral rater.", [{ role: "user", text: question }], "")
+    const top = await nextWords(llm, prompt, { prompt: "", values: [], strength: "firm", temperature: 1 })
+    let sum = 0
+    let total = 0
+    for (const a of top) {
+      const level = "ABCDE".indexOf(a.text.trim().toUpperCase().replace(/[^A-E]/g, "").slice(0, 1) || "?")
+      if (level < 0) continue
+      sum += a.p * (level - 2)
+      total += a.p
+    }
+    return total > 0.05 ? sum / total : 0
+  }
+
+  async function selfScore(ask: string, sentences: string[], indices: number[], signal: AbortSignal) {
+    const llm = await ready
+    const values = chosen()
+    const out = new Map<number, Scores>()
+    for (const i of indices) {
+      const scores: Scores = {}
+      for (const v of values) {
+        if (signal.aborted) throw new DOMException("aborted", "AbortError")
+        const release = await turn()
+        try {
+          scores[v] = await rate(llm, ask, sentences, i, v)
+        } finally {
+          release()
+        }
+      }
+      out.set(i, scores)
+    }
+    return out
+  }
+
+  async function selfCompare(ask: string, plain: string, guided: string, values: ValueId[], signal: AbortSignal) {
+    const llm = await ready
+    const release = await turn()
+    try {
+      if (signal.aborted) return []
+      const question = [
+        `A person asked an AI assistant:\n"${ask}"`,
+        `Reply A (no special values):\n"${plain}"`,
+        `Reply B (told to put ${values.map((id) => valueOf(id).name.toLowerCase()).join(", ")} first):\n"${guided}"`,
+        "In two or three short sentences, say how Reply B differs in substance from Reply A: the advice it gives, risks it raises or leaves out, and whom it serves. Start every sentence with \"Reply B\". Plain prose, no lists.",
+      ].join("\n\n")
+      const out = await llm.completions.create({
+        prompt: format.render("You are a careful, neutral analyst.", [{ role: "user", text: question }], ""),
+        stream: false,
+        temperature: 0.3,
+        max_tokens: 140,
+        stop: format.stop,
+      })
+      const text = (out.choices[0]?.text ?? "").replace(/\*\*|^[-*•\d.)\s]+/gm, "").replace(/\s+/g, " ").trim()
+      return (text.match(/[^.!?]+[.!?]+/g) ?? [text]).map((t) => t.trim()).filter((t) => t.length > 12).slice(0, 3)
+    } finally {
+      release()
+    }
+  }
+
   const isStop = (t: string) => /<\|[^|]*\|>|<\/s>|<end_of_turn>|<eos>|\[INST\]/.test(t)
 
   return {
-    label: `${name} · in browser`,
+    label: `${name} · in browser${judge === "self" ? " · self-scored" : ""}`,
     kind: "local",
-    score: scorer?.score,
-    drivers: scorer?.drivers,
-    compare: scorer?.compare,
+    judgeLabel: judge === "self" ? `${name}, in this browser` : judge ? judge.label : undefined,
+    score: judge === "self" ? selfScore : judge?.score,
+    drivers: judge === "self" ? undefined : judge?.drivers,
+    compare: judge === "self" ? selfCompare : judge?.compare,
     async *write(req, signal, prefix = "") {
       const llm = await ready
       const release = await turn()

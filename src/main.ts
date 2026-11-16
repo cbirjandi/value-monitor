@@ -5,7 +5,7 @@ import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { addCustomValue, allValues, colorOf, MAX_CHOSEN, nameOf, removeCustomValue, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
-const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-4" }
+const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", judge: "vm-judge", ui: "vm-ui-4" }
 const RERUN_MS = 650
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
@@ -103,6 +103,12 @@ function run() {
     const cached = plainCache.get(plainId)
     const covers = (c: Column) => ui.chosen.every((id) => c.scores.every((sc) => !sc || id in sc))
     if (cached && !cached.error && covers(cached)) cols.push(cached)
+    else if (cached && !cached.error && engine.score) {
+      // Same reply, newly chosen values: score it again rather than writing it again.
+      cached.scores = []
+      cols.push(cached)
+      jobs.push(runColumn(cached, engine, nothing(), signal, paint))
+    }
     else {
       const col = newColumn("plain", "No values", requestOf(prompt, []))
       cols.push(col)
@@ -125,6 +131,8 @@ function run() {
 
 /** Once the replies are written, check which words of the guided reply the values changed (in-browser model only). */
 async function compareWords(signal: AbortSignal) {
+  // The word check costs a model call per word, so it only runs when its result is on screen.
+  if (ui.highlight !== "values") return
   for (const { col } of slots) if (!signal.aborted && !col.error) await probeColumn(col, engine, signal, paint)
 }
 
@@ -221,7 +229,14 @@ function grow(mode: "extend" | "regrow" | "revalue", only?: Slot) {
   for (const slot of slots) {
     const { col } = slot
     if (only && slot !== only) continue
-    if (mode === "revalue" && col.kind !== "guided") continue
+    if (mode === "revalue" && col.kind !== "guided") {
+      // The plain reply stays, but it needs scores for any value it hasn't been rated on.
+      if (engine.score && !ui.chosen.every((id) => col.scores.every((sc) => !sc || id in sc))) {
+        col.scores = []
+        jobs.push(runColumn(col, engine, nothing(), signal, paint))
+      }
+      continue
+    }
     // Text written in a separate "keep going" turn is re-read before comparing (see probeColumn).
     if (mode === "extend" && engine.kind === "local") col.reprobeFrom = Math.min(col.reprobeFrom ?? Infinity, col.pieces.length)
     if (mode !== "extend") truncateColumn(col, cutAfter(col.text, reveal ?? countWords(col.text)))
@@ -240,6 +255,8 @@ function grow(mode: "extend" | "regrow" | "revalue", only?: Slot) {
     compareWords(signal)
   })
 }
+
+async function* nothing(): AsyncIterable<never> {}
 
 /** A request with the current tuning. Amplification only applies where it can: in-browser models, with values. */
 function requestOf(prompt: string, values: ValueId[]): WriteRequest {
@@ -288,7 +305,7 @@ async function compareReplies(signal: AbortSignal) {
     if (signal.aborted) return
     const points = comparisons.get(id)!
     list.innerHTML = points.map((p) => `<li>${esc(p)}</li>`).join("")
-    note.textContent = points.length ? `Written by ${engine.kind === "local" ? "Gemini" : engine.label}, reading both full replies.` : "No substantive differences found."
+    note.textContent = points.length ? `Written by ${engine.judgeLabel ?? engine.label}, reading both full replies.` : "No substantive differences found."
   } catch (e) {
     if (!signal.aborted) note.textContent = e instanceof Error ? e.message : String(e)
   } finally {
@@ -606,6 +623,7 @@ function bindTune() {
       saveUi()
       updateEngineUi()
       paint()
+      if (ui.highlight === "values" && controller && !slots.some((s) => s.col.streaming || s.col.probing)) compareWords(controller.signal)
     }),
   )
   const temp = $<HTMLInputElement>("temperature")
@@ -651,6 +669,13 @@ function savedKind(): EngineKind {
   return read(STORE.key) && read(STORE.model) ? "gemini" : "sim"
 }
 
+/** Who scores and compares in in-browser mode; Gemini only if a key is saved and the user hasn't picked the local model. */
+function savedJudge(): "self" | "gemini" {
+  const j = read(STORE.judge)
+  if (j === "self" || j === "gemini") return j
+  return geminiFromStorage() ? "gemini" : "self"
+}
+
 function geminiFromStorage() {
   const key = read(STORE.key)
   const model = read(STORE.model)
@@ -662,7 +687,9 @@ function engineFromStorage(): Engine {
   if (kind === "local") {
     const id = read(STORE.local) || LOCAL_MODELS[0].id
     progress = { fraction: 0, text: "Starting", done: false }
-    return localEngine(id, geminiFromStorage(), onProgress)
+    const gemini = geminiFromStorage()
+    const judge = savedJudge() === "gemini" && gemini ? gemini : "self"
+    return localEngine(id, judge, onProgress, () => ui.chosen)
   }
   progress = null
   return (kind === "gemini" && geminiFromStorage()) || simEngine
@@ -728,20 +755,34 @@ function bindSettings() {
   const notes: Record<EngineKind, string> = {
     sim: "Canned replies for the examples. No setup, and nothing is sent anywhere.",
     gemini: "Google's Gemini writes and scores the replies. Best writing.",
-    local: "A small open model runs inside this browser and shows how sure it was of every word. With a Gemini key, Gemini also scores the values.",
+    local: "A small open model runs inside this browser and shows how sure it was of every word. Nothing you type leaves this computer unless you choose Gemini for scoring.",
   }
+  let judge: "self" | "gemini" = savedJudge()
+  const judgeSeg = $("judge-seg")
+  const paintJudge = () => {
+    judgeSeg.querySelectorAll<HTMLButtonElement>("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.v === judge)))
+    $("judge-note").textContent =
+      judge === "self"
+        ? "Rates each sentence on your chosen values by reading the model's own answer probabilities, and writes the comparison. Free and private, but slower and rougher than Gemini."
+        : "Gemini Decision 1 scores every value with calibrated probabilities, and Gemini writes the comparison and highlights your prompt. Needs the key below."
+  }
+  judgeSeg.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.onclick = () => ((judge = b.dataset.v as "self" | "gemini"), paintJudge(), paintKind())))
   const paintKind = () => {
     seg.querySelectorAll<HTMLButtonElement>("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.v === kind)))
     $("local-field").hidden = kind !== "local"
-    $("key-field").hidden = kind === "sim"
-    $("model-field").hidden = kind === "sim"
-    $("key-label").textContent = kind === "local" ? "Gemini API key (optional, for scoring values)" : "Gemini API key"
+    $("judge-field").hidden = kind !== "local"
+    const needsGemini = kind === "gemini" || (kind === "local" && judge === "gemini")
+    $("key-field").hidden = !needsGemini
+    $("model-field").hidden = !needsGemini
+    $("key-label").textContent = "Gemini API key"
     $("engine-note").textContent = notes[kind]
   }
   seg.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.onclick = () => ((kind = b.dataset.v as EngineKind), paintKind())))
 
   const open = () => {
     kind = savedKind()
+    judge = savedJudge()
+    paintJudge()
     keyInput.value = read(STORE.key)
     localSel.value = read(STORE.local) || LOCAL_MODELS[0].id
     const saved = read(STORE.model)
@@ -780,6 +821,7 @@ function bindSettings() {
   dialog.addEventListener("close", () => {
     if (dialog.returnValue !== "save") return
     write(STORE.engine, kind)
+    write(STORE.judge, judge)
     write(STORE.key, keyInput.value.trim())
     if (modelSel.value) write(STORE.model, modelSel.value)
     write(STORE.local, localSel.value)

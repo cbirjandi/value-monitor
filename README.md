@@ -39,6 +39,8 @@ Open **Settings** (the gear) and choose who writes the replies:
   * *Steerable*: Nous Research's Hermes models, fine-tuned to follow the system prompt rather than refuse on moral grounds, so the values you pick steer them much further.
 * **Gemini**: Google's API, called directly from the browser with your key.
 
+In in-browser mode, Settings chooses who scores the sentences and writes the comparison: **this in-browser model** (free and private; it rates each sentence on your chosen values by reading the probabilities of a one-letter answer, A to E, the way a decision model does) or **Gemini** (Gemini Decision 1 for calibrated scores on every value, plus prompt highlights).
+
 ## Tune
 
 The **Tune** button opens three settings:

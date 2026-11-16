@@ -194,7 +194,8 @@ export async function probeColumn(col: Column, engine: Engine, signal: AbortSign
   try {
     for (const [k, piece] of col.pieces.entries()) {
       if (signal.aborted) return
-      if (piece.p === undefined || piece.plain || !col.text.slice(piece.start, piece.end).trim()) continue
+      // Punctuation and spaces carry no value signal; skipping them saves a model call each.
+      if (piece.p === undefined || piece.plain || !/[A-Za-z0-9]/.test(col.text.slice(piece.start, piece.end))) continue
       const before = col.text.slice(0, piece.start)
       if (k >= (col.reprobeFrom ?? Infinity)) {
         const withValues = await engine.probe(guided, before, signal)

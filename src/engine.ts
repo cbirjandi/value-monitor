@@ -27,6 +27,8 @@ export type Engine = {
   /** Scores the sentences at `indices` on every value, reading the others for context. */
   score?(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
+  /** Who does the scoring and comparison, when it isn't the engine itself. */
+  judgeLabel?: string
   /** A few short points on how the guided reply differs in substance from the plain one. */
   compare?(prompt: string, plain: string, guided: string, values: ValueId[], signal: AbortSignal): Promise<string[]>
 }
