@@ -24,6 +24,14 @@ Open the address it prints (usually http://localhost:5173). With no key you're i
 
 Visitors bring their own key. Never put your key in the code: anyone could read it from the page. If you want visitors to use your key, put a small proxy in front of Gemini (a Cloudflare Worker, for example) that holds the key and rate-limits requests.
 
+## Three ways to run it
+
+Open **Settings** (the gear) and choose who writes the replies:
+
+* **Sim**: canned replies for the examples. No setup.
+* **Gemini**: Google's model writes and scores. Needs a free API key.
+* **In this browser**: a small open-weight model (Qwen2.5 0.5B or 1.5B) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
+
 ## How it works
 
 | Step | What happens | File |
@@ -36,7 +44,7 @@ Visitors bring their own key. Never put your key in the code: anyone could read 
 
 Settings can import the top four priorities from a Constitution Lab constitution.
 
-Sim and Gemini share one `Engine` type (`write`, `score`, `drivers`), so adding another provider means writing one more engine.
+Sim, Gemini and the in-browser model (`src/local.ts`, running in a Web Worker via WebLLM) share one `Engine` type, so adding another provider means writing one more engine.
 
 ## Limits
 

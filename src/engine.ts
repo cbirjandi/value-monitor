@@ -6,15 +6,20 @@ import { V, VALUE_IDS, type Scores, type Strength, type ValueId } from "./values
 export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength }
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
 export type Driver = { phrase: string; value: ValueId }
+export type Alt = { text: string; p: number }
+/** A piece of streamed text. Models that expose probabilities send one per token, with the chosen token's probability and the top alternatives. */
+export type Piece = { text: string; p?: number; alts?: Alt[] }
 
-/** Where replies and scores come from: Gemini, or canned ones for trying the app without a key. */
+/** Where replies and scores come from: Gemini, a small model in the browser, or canned replies for trying the app without setup. */
 export type Engine = {
   label: string
-  isSim: boolean
-  write(req: WriteRequest, signal: AbortSignal): AsyncIterable<string>
+  kind: "sim" | "gemini" | "local"
+  /** Can continue a reply from a given beginning, which is what rewriting from a chosen word needs. */
+  canBranch: boolean
+  write(req: WriteRequest, signal: AbortSignal, prefix?: string): AsyncIterable<Piece>
   /** Scores the sentences at `indices` on every value, from -2 (gives it up) to 2 (upholds it), reading the others for context. */
-  score(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
-  drivers(prompt: string, signal: AbortSignal): Promise<Driver[]>
+  score?(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
+  drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
 }
 
 export const EXAMPLES = data.dilemmas as { title: string; a: ValueId; b: ValueId; prompt: string; ra: string; rb: string }[]
@@ -64,8 +69,11 @@ export function geminiEngine(key: string, model: string): Engine {
   const call = <T>(user: string, schema: object, signal: AbortSignal) => withRetry(() => generateJson<T>({ key, model, user, temperature: 0, schema, signal }), signal)
   return {
     label: model,
-    isSim: false,
-    write: (req, signal) => streamText({ key, model, system: systemPromptOf(req), user: req.prompt, temperature: 0.7, signal }),
+    kind: "gemini",
+    canBranch: false,
+    async *write(req, signal) {
+      for await (const text of streamText({ key, model, system: systemPromptOf(req), user: req.prompt, temperature: 0.7, signal })) yield { text }
+    },
     async score(prompt, sentences, indices, signal) {
       const user = [
         "You audit which values an AI assistant's reply expresses, one sentence at a time.",
@@ -110,13 +118,14 @@ async function withRetry<T>(fn: () => Promise<T>, signal: AbortSignal): Promise<
 /** Canned replies from the example set, streamed at a readable pace, with scores that follow which reply a sentence came from. */
 export const simEngine: Engine = {
   label: "Sim mode",
-  isSim: true,
+  kind: "sim",
+  canBranch: false,
   async *write(req, signal) {
     const words = simReply(req).match(/\S+\s*/g) ?? []
     await sleep(260, signal)
     for (let i = 0; i < words.length; i += 2) {
       await sleep(55, signal)
-      yield words.slice(i, i + 2).join("")
+      yield { text: words.slice(i, i + 2).join("") }
     }
   },
   async score(prompt, sentences, indices, signal) {

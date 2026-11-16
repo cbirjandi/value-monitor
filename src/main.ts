@@ -1,9 +1,11 @@
 import { createColumnView, newColumn, runColumn, type Column } from "./column.ts"
-import { EXAMPLES, geminiEngine, simEngine, type Driver, type Engine } from "./engine.ts"
+import { EXAMPLES, geminiEngine, simEngine, type Alt, type Driver, type Engine } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
+import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { colorOf, MAX_CHOSEN, topValuesFromLab, V, VALUES, type Strength, type ValueId } from "./values.ts"
 
-const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", ui: "vm-ui-2" }
+type EngineKind = Engine["kind"]
+const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-2" }
 const RERUN_MS = 650
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
@@ -12,17 +14,22 @@ const promptEdit = $<HTMLTextAreaElement>("prompt")
 const chipsEl = $("chips")
 const strengthEl = $("strength")
 const compare = $<HTMLInputElement>("compare")
+const confidence = $<HTMLInputElement>("confidence")
 const output = $("output")
 const statusEl = $("status")
 const focusNote = $("focus-note")
+const popover = $("popover")
+const loadBar = $("load-bar")
 
-type Ui = { prompt: string; example: number; chosen: ValueId[]; strength: Strength; compare: boolean }
-const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: ["candor", "kindness"], strength: "firm", compare: true, ...loadUi() }
+type Ui = { prompt: string; example: number; chosen: ValueId[]; strength: Strength; compare: boolean; confidence: boolean }
+const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: ["candor", "kindness"], strength: "firm", compare: true, confidence: true, ...loadUi() }
 
+let progress: Progress | null = null
 let engine: Engine = engineFromStorage()
 let controller: AbortController | undefined
 let rerunTimer: number | undefined
-let columns: { col: Column; update: ReturnType<typeof createColumnView> }[] = []
+type Slot = { col: Column; update: ReturnType<typeof createColumnView>; el: HTMLElement }
+let slots: Slot[] = []
 /** The plain reply doesn't depend on the chosen values, so it is kept per model and prompt. */
 const plainCache = new Map<string, Column>()
 const driverCache = new Map<string, Driver[]>()
@@ -31,8 +38,9 @@ renderChips()
 renderStrength()
 renderPrompt()
 compare.checked = ui.compare
+confidence.checked = ui.confidence
 renderEmpty()
-updateModel()
+updateEngineUi()
 bindSettings()
 document.body.dataset.ready = "1"
 
@@ -50,20 +58,28 @@ promptEdit.addEventListener("keydown", (e) => {
 })
 $("shuffle").addEventListener("click", () => {
   ui.example = (ui.example + 1) % EXAMPLES.length
-  const ex = EXAMPLES[ui.example]
-  ui.prompt = ex.prompt
+  ui.prompt = EXAMPLES[ui.example].prompt
   saveUi()
   renderPrompt()
   run()
 })
 $("run").addEventListener("click", run)
 compare.addEventListener("change", () => ((ui.compare = compare.checked), saveUi(), scheduleRerun()))
+confidence.addEventListener("change", () => ((ui.confidence = confidence.checked), saveUi(), updateEngineUi()))
+output.addEventListener("click", onTokenClick)
+document.addEventListener("click", (e) => {
+  const t = e.target as HTMLElement
+  if (!popover.hidden && !popover.contains(t) && !t.closest(".tok")) closePopover()
+})
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closePopover()
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) (e.preventDefault(), run())
 })
+window.addEventListener("resize", closePopover)
 
 function run() {
   window.clearTimeout(rerunTimer)
+  closePopover()
   const prompt = ui.prompt.trim()
   if (!prompt) return setStatus("Write a question first.")
   controller?.abort()
@@ -72,49 +88,60 @@ function run() {
   setStatus("")
 
   const plainId = `${engine.label}\n${prompt}`
-  const wanted: { col: Column; job?: Promise<void> }[] = []
+  const jobs: Promise<void>[] = []
+  const cols: Column[] = []
   if (ui.compare || !ui.chosen.length) {
     const cached = plainCache.get(plainId)
-    if (cached && !cached.error) wanted.push({ col: cached })
+    if (cached && !cached.error) cols.push(cached)
     else {
-      const col = newColumn("No values", prompt)
-      wanted.push({ col, job: runColumn(col, engine, engine.write({ prompt, values: [], strength: ui.strength }, signal), signal, paint).then(() => void (!col.error && !signal.aborted && plainCache.set(plainId, col))) })
+      const col = newColumn("plain", "No values", { prompt, values: [], strength: ui.strength })
+      cols.push(col)
+      jobs.push(runColumn(col, engine, engine.write(col.request, signal), signal, paint).then(() => void (!col.error && !signal.aborted && plainCache.set(plainId, col))))
     }
   }
   if (ui.chosen.length) {
-    const col = newColumn(`With ${listOf(ui.chosen.map((id) => V[id].name.toLowerCase()))}`, prompt)
-    wanted.push({ col, job: runColumn(col, engine, engine.write({ prompt, values: ui.chosen, strength: ui.strength }, signal), signal, paint) })
+    const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => V[id].name.toLowerCase()))}`, { prompt, values: ui.chosen, strength: ui.strength })
+    cols.push(col)
+    jobs.push(runColumn(col, engine, engine.write(col.request, signal), signal, paint))
   }
 
   output.replaceChildren()
-  output.classList.toggle("two", wanted.length === 2)
-  columns = wanted.map(({ col }) => {
-    const el = document.createElement("article")
-    el.className = "col"
-    output.append(el)
-    return { col, update: createColumnView(el) }
-  })
+  output.classList.toggle("two", cols.length === 2)
+  slots = cols.map((col) => mountSlot(col))
   paint()
   loadDrivers(prompt, signal)
-  Promise.all(wanted.map((w) => w.job)).then(() => {
+  settle(jobs, signal)
+}
+
+function mountSlot(col: Column, replace?: HTMLElement): Slot {
+  const el = document.createElement("article")
+  el.className = "col"
+  if (replace) replace.replaceWith(el)
+  else output.append(el)
+  return { col, el, update: createColumnView(el) }
+}
+
+function settle(jobs: Promise<void>[], signal: AbortSignal) {
+  Promise.all(jobs).then(() => {
     if (signal.aborted) return
-    const failed = columns.find((c) => c.col.error)
+    const failed = slots.find((s) => s.col.error)
     setStatus(failed ? failed.col.error! : "")
   })
 }
 
 function paint() {
-  const plain = columns.find((c) => c.col.title === "No values")?.col
-  for (const { col, update } of columns) update(col, ui.chosen, col === plain ? undefined : plain)
+  const plain = slots.find((s) => s.col.kind === "plain")?.col
+  for (const { col, update } of slots) update(col, ui.chosen, !!engine.score, col === plain ? undefined : plain)
 }
 
 function scheduleRerun() {
-  if (!columns.length) return
+  if (!slots.length) return
   window.clearTimeout(rerunTimer)
   rerunTimer = window.setTimeout(run, RERUN_MS)
 }
 
 async function loadDrivers(prompt: string, signal: AbortSignal) {
+  if (!engine.drivers) return renderPrompt()
   const id = `${engine.label}\n${prompt}`
   if (!driverCache.has(id)) {
     try {
@@ -125,6 +152,84 @@ async function loadDrivers(prompt: string, signal: AbortSignal) {
   }
   if (!signal.aborted) renderPrompt()
 }
+
+/* Token probabilities: what the model almost said, and rewriting from a different word. */
+
+function onTokenClick(e: MouseEvent) {
+  const tok = (e.target as HTMLElement).closest<HTMLElement>(".tok")
+  if (!tok) return
+  const slot = slots.find((s) => s.el.contains(tok))
+  const k = Number(tok.dataset.k)
+  const piece = slot?.col.pieces[k]
+  if (!slot || !piece || piece.p === undefined) return
+  output.querySelectorAll(".tok.open").forEach((t) => t.classList.remove("open"))
+  tok.classList.add("open")
+
+  const chosenText = slot.col.text.slice(piece.start, piece.end)
+  const alts: Alt[] = [...(piece.alts ?? [])]
+  if (!alts.some((a) => a.text === chosenText)) alts.push({ text: chosenText, p: piece.p })
+  alts.sort((a, b) => b.p - a.p)
+  const busy = slots.some((s) => s.col.streaming || s.col.scoring)
+  const canBranch = engine.canBranch && !busy
+  popover.innerHTML = `
+    <p class="pop-head">${piece.forced ? "You picked" : "The model chose"} <b>${shown(chosenText)}</b> <span>${pct(piece.p)}</span></p>
+    <ol class="pop-list">${alts
+      .map(
+        (a, i) => `<li class="${a.text === chosenText ? "picked" : ""}">
+          <button type="button" data-i="${i}" ${a.text === chosenText || !canBranch ? "disabled" : ""} title="${a.text === chosenText ? "Already chosen" : "Rewrite the rest of the reply starting from this word"}">
+            <span class="pop-word">${shown(a.text)}</span><span class="pop-bar"><i style="width:${Math.max(2, a.p * 100)}%"></i></span><span class="pop-p">${pct(a.p)}</span>
+          </button></li>`,
+      )
+      .join("")}</ol>
+    <p class="pop-foot">${canBranch ? "Click another word to rewrite from here." : busy ? "Wait for the replies to finish to rewrite from here." : ""}</p>`
+  popover.hidden = false
+  positionPopover(tok)
+  popover.querySelectorAll<HTMLButtonElement>("button[data-i]").forEach((b) =>
+    b.addEventListener("click", () => {
+      closePopover()
+      branch(slot, k, alts[Number(b.dataset.i)])
+    }),
+  )
+}
+
+function positionPopover(anchor: HTMLElement) {
+  const r = anchor.getBoundingClientRect()
+  const w = popover.offsetWidth
+  const h = popover.offsetHeight
+  const left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), window.innerWidth - w - 12)
+  const below = r.bottom + 8 + h < window.innerHeight
+  popover.style.left = `${left + window.scrollX}px`
+  popover.style.top = `${(below ? r.bottom + 8 : r.top - h - 8) + window.scrollY}px`
+}
+
+function closePopover() {
+  popover.hidden = true
+  output.querySelectorAll(".tok.open").forEach((t) => t.classList.remove("open"))
+}
+
+/** Keeps the reply up to the chosen word, swaps in the alternative, and lets the model continue from there. */
+function branch(slot: Slot, k: number, alt: Alt) {
+  const old = slot.col
+  const piece = old.pieces[k]
+  controller?.abort()
+  controller = new AbortController()
+  const { signal } = controller
+  const col = newColumn(old.kind, `${old.title.replace(/ · rewritten.*$/, "")} · rewritten from “${alt.text.trim()}”`, old.request)
+  col.pieces = old.pieces.slice(0, k).map((p) => ({ ...p }))
+  col.text = old.text.slice(0, piece.start) + alt.text
+  col.pieces.push({ start: piece.start, end: col.text.length, p: alt.p, alts: piece.alts, forced: true })
+  const keep = old.sentences.findIndex((s) => s.end > piece.start)
+  col.scores = old.scores.slice(0, keep < 0 ? old.scores.length : keep)
+  const next = mountSlot(col, slot.el)
+  slots = slots.map((s) => (s === slot ? next : s))
+  paint()
+  settle([runColumn(col, engine, engine.write(col.request, signal, col.text), signal, paint)], signal)
+}
+
+const pct = (p: number) => `${p >= 0.995 ? ">99" : p < 0.01 ? "<1" : Math.round(p * 100)}%`
+const shown = (t: string) => (t.trim() ? esc(t.trim()) : t.includes("\n") ? "↵" : "␣")
+
+/* Values, strength, prompt */
 
 function renderChips() {
   chipsEl.innerHTML = VALUES.map((v) => `<button type="button" class="chip" data-id="${v.id}" title="${esc(v.principle)}"><i></i>${v.name}</button>`).join("")
@@ -230,27 +335,92 @@ function listOf(items: string[]) {
   return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`
 }
 
-function engineFromStorage(): Engine {
-  const key = read(STORE.key)
-  const model = read(STORE.model)
-  return key && model ? geminiEngine(key, model) : simEngine
+/* Engines and settings */
+
+function savedKind(): EngineKind {
+  const k = read(STORE.engine)
+  if (k === "sim" || k === "gemini" || k === "local") return k
+  return read(STORE.key) && read(STORE.model) ? "gemini" : "sim"
 }
 
-function updateModel() {
-  $("model-label").textContent = engine.isSim ? "Sim mode · add a key" : engine.label
-  $("model-btn").classList.toggle("sim", engine.isSim)
+function geminiFromStorage() {
+  const key = read(STORE.key)
+  const model = read(STORE.model)
+  return key && model ? geminiEngine(key, model) : null
+}
+
+function engineFromStorage(): Engine {
+  const kind = savedKind()
+  if (kind === "local") {
+    const id = read(STORE.local) || LOCAL_MODELS[0].id
+    progress = { fraction: 0, text: "Starting", done: false }
+    return localEngine(id, geminiFromStorage(), onProgress)
+  }
+  progress = null
+  return (kind === "gemini" && geminiFromStorage()) || simEngine
+}
+
+function onProgress(p: Progress) {
+  progress = p
+  updateEngineUi()
+  if (p.error) setStatus(p.error)
+}
+
+function updateEngineUi() {
+  if (!engine) return
+  const local = engine.kind === "local"
+  const loading = local && !!progress && !progress.done
+  $("model-label").textContent = loading
+    ? `Loading ${engine.label.replace(" · in browser", "")} · ${Math.round((progress?.fraction ?? 0) * 100)}%`
+    : engine.kind === "sim"
+      ? "Sim mode · open settings to use a real model"
+      : engine.label
+  $("model-btn").classList.toggle("sim", engine.kind === "sim")
+  $("model-btn").classList.toggle("loading", loading)
+  loadBar.hidden = !loading
+  loadBar.style.setProperty("--p", String(progress?.fraction ?? 0))
+  $("conf-toggle").hidden = !local
+  $("local-hint").hidden = !local || !ui.confidence
+  output.classList.toggle("conf", local && ui.confidence)
 }
 
 function bindSettings() {
   const dialog = $<HTMLDialogElement>("settings")
+  const seg = $("engine-seg")
   const keyInput = $<HTMLInputElement>("key")
   const modelSel = $<HTMLSelectElement>("model")
+  const localSel = $<HTMLSelectElement>("local-model")
   const modelsStatus = $("models-status")
+  let kind: EngineKind = savedKind()
+
+  localSel.innerHTML = LOCAL_MODELS.map((m) => `<option value="${m.id}">${m.name} · ${m.note}</option>`).join("")
+  $("webgpu-note").textContent = hasWebGPU()
+    ? "Downloads once, then stays cached in this browser. It runs on this computer's graphics chip, and nothing is sent anywhere."
+    : "This browser can't run local models (no WebGPU). Use a current Chrome or Edge."
+
+  const notes: Record<EngineKind, string> = {
+    sim: "Canned replies for the examples. No setup, and nothing is sent anywhere.",
+    gemini: "Google's Gemini writes and scores the replies. Best writing.",
+    local: "A small open model runs inside this browser and shows how sure it was of every word. With a Gemini key, Gemini also scores the values.",
+  }
+  const paintKind = () => {
+    seg.querySelectorAll<HTMLButtonElement>("button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.v === kind)))
+    $("local-field").hidden = kind !== "local"
+    $("key-field").hidden = kind === "sim"
+    $("model-field").hidden = kind === "sim"
+    $("key-label").textContent = kind === "local" ? "Gemini API key (optional, for scoring values)" : "Gemini API key"
+    $("engine-note").textContent = notes[kind]
+  }
+  seg.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.onclick = () => ((kind = b.dataset.v as EngineKind), paintKind())))
+
   const open = () => {
+    kind = savedKind()
     keyInput.value = read(STORE.key)
+    localSel.value = read(STORE.local) || LOCAL_MODELS[0].id
     const saved = read(STORE.model)
     modelSel.innerHTML = saved ? `<option>${esc(saved)}</option>` : `<option value="">Paste a key, then Find my models</option>`
     modelsStatus.textContent = ""
+    paintKind()
     dialog.showModal()
   }
   const findModels = async () => {
@@ -282,12 +452,15 @@ function bindSettings() {
   })
   dialog.addEventListener("close", () => {
     if (dialog.returnValue !== "save") return
+    write(STORE.engine, kind)
     write(STORE.key, keyInput.value.trim())
     if (modelSel.value) write(STORE.model, modelSel.value)
+    write(STORE.local, localSel.value)
     engine = engineFromStorage()
-    updateModel()
-    if (keyInput.value.trim() && !modelSel.value) setStatus("Press Find my models and save again to switch from sim mode.")
+    updateEngineUi()
+    setStatus(kind === "gemini" && engine.kind !== "gemini" ? "Paste a key and press Find my models to use Gemini." : "")
     renderPrompt()
+    paint()
   })
 }
 
