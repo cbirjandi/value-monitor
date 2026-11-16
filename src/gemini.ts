@@ -121,3 +121,23 @@ async function errorOf(res: Response) {
   if (res.status === 403) message = "This key can't use that model. Pick another in Settings."
   return new ApiError(res.status, message, retry)
 }
+
+/** A rubric question for Gemini Decision 1: `criteria[i]` describes level i. */
+export type ScoreQuestion = { type: "score"; instructions: string; criteria: string[] }
+export type ScoreAnswer = { type: "score"; score: number; probabilities?: Record<string, number>; legend?: Record<string, string>; confidence?: number }
+
+/**
+ * Asks Gemini Decision 1 many closed questions in one pass. It doesn't write text; it returns a calibrated probability for
+ * every level of every question. https://blog.google/innovation-and-ai/technology/developers-tools/gemini-decisions-api/
+ */
+export async function decide(key: string, input: string, questions: Record<string, ScoreQuestion>, signal: AbortSignal) {
+  const res = await fetch(`${BASE}/decisions`, {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+    body: JSON.stringify({ model: "gemini-decision-1", input, questions }),
+  })
+  if (!res.ok) throw await errorOf(res)
+  const body = (await res.json()) as { answers?: Record<string, ScoreAnswer> }
+  return body.answers ?? {}
+}

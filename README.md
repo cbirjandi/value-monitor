@@ -30,7 +30,7 @@ Open **Settings** (the gear) and choose who writes the replies:
 
 * **Sim**: canned replies for the examples. No setup.
 * **Gemini**: Google's model writes and scores. Needs a free API key.
-* **In this browser**: a small open-weight model (Qwen, Llama, Gemma, Phi or Mistral, from 0.5B to 8B parameters) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; words where its first choice was different are colored, so you can see exactly which words your values changed. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
+* **In this browser**: a small open-weight model (Qwen, Llama, Gemma, Phi or Mistral, from 0.5B to 8B parameters) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; each word is classed from the two distributions at that point: colored if the values changed the model's first choice, underlined if they made the word at least twice as likely, and left plain if the model just sampled a lower-ranked word by chance. Clicking a word shows both distributions side by side. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
 
 ## How it works
 
@@ -40,7 +40,8 @@ Open **Settings** (the gear) and choose who writes the replies:
 | Tidy | Replies are cleaned as they stream (no list numbers, markdown or line breaks). | `src/engine.ts` |
 | Scrub | Like the Spaceship IDE, an orange cursor rides along as the reply is written. Drag it to the end and the model keeps writing. Drag it back and let go, and everything after it is replaced by a new ending written from there. The summary follows the cursor, and changing values while it's pulled back rewrites the guided reply from the cursor. | `src/column.ts`, `src/main.ts` |
 | Write | Two replies stream side by side: one with no values, one told to hold yours. The no-values reply is kept per question, so changing values only rewrites one side. | `src/engine.ts` |
-| Score | As soon as a couple of sentences are complete, a second call rates them on every value from -2 to 2, so the rail fills in while the reply is still being written. | `src/column.ts` |
+| Score | As soon as a couple of sentences are complete, Gemini Decision 1 rates each one on every value (a rubric from -2 to 2) and returns calibrated probabilities; the bars show the expected score. If the Decisions API isn't available, a Gemini text model scores instead. | `src/engine.ts`, `src/gemini.ts` |
+| Compare | When both replies are finished, Gemini names the two or three most important differences in substance. | `src/main.ts` |
 | Highlight | One more call picks the phrases in your question that pull on each value, like the Spaceship IDE's focus view. | `src/engine.ts` |
 | Show | Rail bars per sentence, "gives up" pins, and a summary with the change versus the no-values reply. | `src/column.ts`, `src/style.css` |
 

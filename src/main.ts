@@ -1,4 +1,4 @@
-import { countWords, createColumnView, cutAfter, isFlip, newColumn, probeColumn, runColumn, truncateColumn, type Column } from "./column.ts"
+import { countWords, createColumnView, cutAfter, influenceOf, newColumn, probeColumn, runColumn, truncateColumn, type Column, type Influence } from "./column.ts"
 import { EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
@@ -147,9 +147,10 @@ function bindKnob(view: ReturnType<typeof createColumnView>) {
   }
   /** Judged on the reply being dragged: reaching the end of that one keeps both writing. */
   const own = () => countWords(slots.find((s) => s.view === view)?.col.text ?? "")
+  const mine = () => slots.find((s) => s.view === view)
   const settleAt = (from: number) => {
     if (reveal === null) return paint()
-    if (reveal >= own()) grow("extend")
+    if (reveal >= own()) grow("extend", mine())
     else if (reveal < from) grow("regrow")
     else paint()
   }
@@ -159,11 +160,19 @@ function bindKnob(view: ReturnType<typeof createColumnView>) {
     closePopover()
     window.clearTimeout(keyTimer)
     const from = reveal ?? longest()
+    const start = { x: e.clientX, y: e.clientY }
+    let moved = false
     document.body.classList.add("scrubbing")
-    const move = (ev: PointerEvent) => set(view.wordsAt(ev.clientX, ev.clientY))
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 4) return
+      moved = true
+      set(view.wordsAt(ev.clientX, ev.clientY))
+    }
     const up = () => {
       knob.removeEventListener("pointermove", move)
       document.body.classList.remove("scrubbing")
+      // A click on the knob at the end of a finished reply asks that reply to keep writing.
+      if (!moved) return void ((reveal === null || reveal >= own()) && grow("extend", mine()))
       settleAt(from)
     }
     knob.addEventListener("pointermove", move)
@@ -180,7 +189,7 @@ function bindKnob(view: ReturnType<typeof createColumnView>) {
     if (e.key === "ArrowLeft") set(now - step)
     else if (e.key === "ArrowRight") set(now + step)
     else if (e.key === "Home") set(0)
-    else set(longest())
+    else set(own())
     window.clearTimeout(keyTimer)
     keyTimer = window.setTimeout(() => {
       const from = keyFrom ?? now
@@ -196,16 +205,21 @@ let keyTimer: number | undefined
  * `extend` adds more after the end; `regrow` replaces everything after the cursor with a new ending;
  * `revalue` does the same for the guided reply only, with the values now chosen.
  */
-function grow(mode: "extend" | "regrow" | "revalue") {
+function grow(mode: "extend" | "regrow" | "revalue", only?: Slot) {
   if (!slots.length) return
+  if (mode === "extend" && slots.some((s) => s.col.streaming)) return setStatus("Let the replies finish, then drag to the end to keep writing.")
   window.clearTimeout(rerunTimer)
   closePopover()
   controller?.abort()
   controller = new AbortController()
   const { signal } = controller
   const jobs: Promise<void>[] = []
-  for (const { col } of slots) {
+  for (const slot of slots) {
+    const { col } = slot
+    if (only && slot !== only) continue
     if (mode === "revalue" && col.kind !== "guided") continue
+    // Text written in a separate "keep going" turn is re-read before comparing (see probeColumn).
+    if (mode === "extend" && engine.kind === "local") col.reprobeFrom = Math.min(col.reprobeFrom ?? Infinity, col.pieces.length)
     if (mode !== "extend") truncateColumn(col, cutAfter(col.text, reveal ?? countWords(col.text)))
     if (col.kind === "guided") {
       col.request = { prompt: col.request.prompt, values: ui.chosen, strength: ui.strength }
@@ -219,18 +233,55 @@ function grow(mode: "extend" | "regrow" | "revalue") {
   paint()
   settle(jobs, signal).then(() => {
     if (signal.aborted) return
-    if (mode === "extend" && !slots.some((s) => s.col.grew))
+    if (mode === "extend" && !slots.some((s) => (!only || s === only) && s.col.grew))
       setStatus(engine.kind === "sim" ? "Sim mode can't write more. Open Settings to use a real model." : "The model had nothing more to add here.")
     compareWords(signal)
   })
 }
 
 function settle(jobs: Promise<void>[], signal: AbortSignal) {
+  const diff = $("diff")
+  if (slots.length < 2) diff.hidden = true
+  else if (!diff.hidden) diff.classList.add("stale")
   return Promise.all(jobs).then(() => {
     if (signal.aborted) return
     const failed = slots.find((s) => s.col.error)
     setStatus(failed ? failed.col.error! : "")
+    compareReplies(signal)
   })
+}
+
+const comparisons = new Map<string, string[]>()
+
+/** A second model reads both finished replies and names the differences in substance, not wording. */
+async function compareReplies(signal: AbortSignal) {
+  const diff = $("diff")
+  const list = $("diff-points")
+  const note = $("diff-note")
+  const plain = slots.find((s) => s.col.kind === "plain")?.col
+  const guided = slots.find((s) => s.col.kind === "guided")?.col
+  if (!plain || !guided || !plain.text || !guided.text) return void (diff.hidden = true)
+  diff.hidden = false
+  if (!engine.compare) {
+    diff.classList.remove("stale", "loading")
+    list.innerHTML = ""
+    note.textContent = "Add a Gemini key in Settings to get a short written comparison of the two replies."
+    return
+  }
+  const id = `${engine.label}\n${plain.text}\n${guided.text}`
+  diff.classList.add("loading")
+  note.textContent = "Comparing the two replies…"
+  try {
+    if (!comparisons.has(id)) comparisons.set(id, await engine.compare(guided.request.prompt, plain.text, guided.text, guided.request.values, signal))
+    if (signal.aborted) return
+    const points = comparisons.get(id)!
+    list.innerHTML = points.map((p) => `<li>${esc(p)}</li>`).join("")
+    note.textContent = points.length ? `Written by ${engine.kind === "local" ? "Gemini" : engine.label}, reading both full replies.` : "No substantive differences found."
+  } catch (e) {
+    if (!signal.aborted) note.textContent = e instanceof Error ? e.message : String(e)
+  } finally {
+    if (!signal.aborted) diff.classList.remove("loading", "stale")
+  }
 }
 
 function paint() {
@@ -277,39 +328,54 @@ function onTokenClick(e: MouseEvent) {
   tok.classList.add("open")
 
   const chosenText = slot.col.text.slice(piece.start, piece.end)
-  const alts: Alt[] = [...(piece.alts ?? [])]
-  if (!alts.some((a) => a.text === chosenText)) alts.push({ text: chosenText, p: piece.p })
-  alts.sort((a, b) => b.p - a.p)
   const busy = slots.some((s) => s.col.streaming || s.col.scoring || s.col.probing)
   const canBranch = engine.kind === "local" && !busy
-  const flip = isFlip(piece, slot.col.text)
-  const plainLine = piece.plain
-    ? `<p class="pop-plain${flip ? " flip" : ""}">${
-        flip
-          ? `Your values changed this word. With no values, the model's first choice was <b>${shown(piece.plain.top.text)}</b> ${pct(piece.plain.top.p)}, and this word was ${piece.plain.p === undefined ? "not in its top five" : pct(piece.plain.p)}.`
-          : `With no values the model would also pick this word${piece.plain.p !== undefined ? ` (${pct(piece.plain.p)})` : ""}.`
-      }</p>`
-    : ""
+  const inf = influenceOf(piece, slot.col.text)
+  // The rows: every word either distribution put in its top five, ordered by the distribution this reply was written with.
+  const withValues = inf?.withValues ?? [...(piece.alts ?? []), { text: chosenText, p: piece.p }].filter((a, i, l) => l.findIndex((b) => b.text === a.text) === i).sort((a, b) => b.p - a.p)
+  const rows: Alt[] = [...withValues]
+  for (const a of inf?.withoutValues ?? []) if (!rows.some((r) => r.text === a.text)) rows.push({ text: a.text, p: 0 })
+  const pOf = (list: Alt[] | undefined, t: string) => list?.find((a) => a.text === t)?.p
+  const two = !!inf
+  const cell = (p: number | undefined, cls: string) =>
+    p === undefined ? `<span class="pop-cell none">–</span>` : `<span class="pop-cell ${cls}"><span class="pop-bar"><i style="width:${Math.max(2, p * 100)}%"></i></span><span class="pop-p">${pct(p)}</span></span>`
+  popover.classList.toggle("two", two)
   popover.innerHTML = `
-    <p class="pop-head">${piece.forced ? "You picked" : slot.col.kind === "guided" ? "With your values, the model chose" : "The model chose"} <b>${shown(chosenText)}</b> <span>${pct(piece.p)}</span></p>
-    ${plainLine}
-    <ol class="pop-list">${alts
-      .map(
-        (a, i) => `<li class="${a.text === chosenText ? "picked" : ""}">
-          <button type="button" data-i="${i}" ${a.text === chosenText || !canBranch ? "disabled" : ""} title="${a.text === chosenText ? "Already chosen" : "Rewrite the rest of the reply starting from this word"}">
-            <span class="pop-word">${shown(a.text)}</span><span class="pop-bar"><i style="width:${Math.max(2, a.p * 100)}%"></i></span><span class="pop-p">${pct(a.p)}</span>
-          </button></li>`,
-      )
-      .join("")}</ol>
-    <p class="pop-foot">${canBranch ? "Click another word to rewrite from here." : busy ? "Wait for the replies to finish to rewrite from here." : ""}</p>`
+    <p class="pop-head">${piece.forced ? "You picked" : "The model wrote"} <b>${shown(chosenText)}</b></p>
+    ${inf ? `<p class="pop-plain ${inf.kind}">${explain(inf)}</p>` : ""}
+    <div class="pop-grid${two ? " two" : ""}">
+      <span class="pop-colhead"></span>${two ? `<span class="pop-colhead">with values</span><span class="pop-colhead">no values</span>` : `<span class="pop-colhead">probability</span>`}
+      ${rows
+        .map(
+          (a, i) => `<button type="button" class="pop-row${a.text === chosenText ? " picked" : ""}" data-i="${i}" ${a.text === chosenText || !canBranch ? "disabled" : ""} title="${a.text === chosenText ? "The word in the reply" : "Rewrite the rest of the reply starting from this word"}">
+            <span class="pop-word">${shown(a.text)}</span>${cell(pOf(withValues, a.text), "with")}${two ? cell(pOf(inf!.withoutValues, a.text), "without") : ""}
+          </button>`,
+        )
+        .join("")}
+    </div>
+    <p class="pop-foot">${two ? "Top five words for each, from the same model reading the same reply up to this word. – means not in that top five. " : ""}${canBranch ? "Click a word to rewrite from here." : busy ? "Rewriting is available once the replies finish." : ""}</p>`
   popover.hidden = false
   positionPopover(tok)
   popover.querySelectorAll<HTMLButtonElement>("button[data-i]").forEach((b) =>
     b.addEventListener("click", () => {
       closePopover()
-      branch(slot, k, alts[Number(b.dataset.i)])
+      const a = rows[Number(b.dataset.i)]
+      branch(slot, k, { text: a.text, p: pOf(withValues, a.text) ?? 0 })
     }),
   )
+}
+
+/** One plain sentence on what the two distributions say about this word. */
+function explain(inf: Influence) {
+  const w = `<b>${shown(inf.word)}</b>`
+  const topWithout = inf.withoutValues[0]
+  const without = inf.pWithout === undefined ? "under " + pct(inf.withoutValues.at(-1)?.p ?? 0) : pct(inf.pWithout)
+  if (inf.kind === "changed")
+    return `Your values changed the model's first choice here. With no values it would most likely write <b>${shown(topWithout.text)}</b> (${pct(topWithout.p)}); with your values ${w} went from ${without} to ${pct(inf.pWith)}.`
+  if (inf.kind === "boosted") return `Same first choice either way, but your values made ${w} more likely: ${without} → ${pct(inf.pWith)}.`
+  if (inf.kind === "chance")
+    return `This word was the model's #${inf.rank} option, picked by chance (the model samples, it doesn't always take the top word). Its first choice with your values was <b>${shown(inf.withValues[0].text)}</b>.`
+  return `Your values made little difference here: ${without} without them, ${pct(inf.pWith)} with them.`
 }
 
 function positionPopover(anchor: HTMLElement) {
@@ -496,6 +562,7 @@ function autosize() {
 }
 
 function renderEmpty() {
+  $("diff").hidden = true
   output.classList.remove("two")
   output.innerHTML = `<div class="empty-state"><p>Pick the values the assistant should hold, then press <b>Run</b>.</p><p class="sub">Each sentence of the reply is checked against them as it's written.</p></div>`
 }
@@ -539,8 +606,8 @@ function paintHint() {
   const local = engine.kind === "local"
   hint.hidden = !slots.length
   hint.innerHTML =
-    `Drag <span class="key-knob"></span> back to write a new ending from there, or to the end to keep it writing · change values to rewrite what comes after it` +
-    (local && ui.confidence ? ` · <span class="key-shade">shaded</span> where the model hesitated · <span class="key-flip">colored</span> where your values changed its choice` : "")
+    `Drag <span class="key-knob"></span> back for a new ending, or click it at the end for more` +
+    (local && ui.confidence ? ` · <span class="key-shade">shaded</span> model hesitated · <span class="key-flip">colored</span> values changed its first choice · <span class="key-boost">underlined</span> values made the word likelier` : "")
 }
 
 function onProgress(p: Progress) {

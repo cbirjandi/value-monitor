@@ -5,13 +5,51 @@ import { colorOf, nameOf, type Scores, type ValueId } from "./values.ts"
 export type Sentence = { text: string; start: number; end: number }
 /**
  * Where a streamed piece sits in the column's text; `forced` marks a word the user picked to rewrite from.
- * `plain` is what the same model, with no values, thought most likely at this point, and how likely it found this piece.
+ * `p` and `alts` are the model's probabilities for this position with the column's values; `plain` holds them with no values.
  */
-export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; plain?: { top: Alt; p?: number } }
+export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; plain?: Alt[] }
 
-/** The values changed this word: with no values, the model's first choice here would have been a different word. */
-export const isFlip = (piece: Span, text: string) => !!piece.plain && norm(piece.plain.top.text) !== norm(text.slice(piece.start, piece.end))
+/**
+ * How the values bear on one word, from the two distributions at that position (same model, same reply so far):
+ * - `changed`: with values the model's first choice is a different word than with none, and it wrote that first choice;
+ * - `boosted`: the first choice is the same, but values made the written word at least twice as likely;
+ * - `chance`: the model wrote a word other than its own first choice, which is sampling, not values;
+ * - `same`: values made no notable difference.
+ */
+export type Influence = { kind: "changed" | "boosted" | "chance" | "same"; word: string; withValues: Alt[]; withoutValues: Alt[]; pWith: number; pWithout?: number; rank: number }
+
+const BOOST = 2
+
+export function influenceOf(piece: Span, text: string): Influence | undefined {
+  if (piece.p === undefined || !piece.plain?.length) return
+  const word = text.slice(piece.start, piece.end)
+  const withValues = sortAlts([...(piece.alts ?? []), { text: word, p: piece.p }])
+  const withoutValues = sortAlts(piece.plain)
+  const rank = withValues.findIndex((a) => same(a.text, word)) + 1
+  const pWithout = withoutValues.find((a) => same(a.text, word))?.p
+  const topWith = withValues[0]
+  const topWithout = withoutValues[0]
+  const base = { word, withValues, withoutValues, pWith: piece.p, pWithout, rank }
+  if (rank > 1) return { kind: "chance", ...base }
+  if (!same(topWith.text, topWithout.text)) return { kind: "changed", ...base }
+  const floor = withoutValues.at(-1)?.p ?? 0
+  if (piece.p >= 0.1 && piece.p / (pWithout ?? floor) >= BOOST) return { kind: "boosted", ...base }
+  return { kind: "same", ...base }
+}
+
+/** Merges duplicate tokens and sorts, most likely first. */
+function sortAlts(list: Alt[]) {
+  const out: Alt[] = []
+  for (const a of list) if (!out.some((b) => b.text === a.text)) out.push(a)
+  return out.sort((a, b) => b.p - a.p)
+}
+
 const norm = (t: string) => t.trim().toLowerCase()
+const same = (a: string, b: string) => a === b || norm(a) === norm(b)
+
+/** A sentence counts as upholding or giving up a value from these scores on the -2 to 2 scale. */
+export const UPHOLDS = 0.6
+export const GIVES_UP = -0.6
 
 export type Column = {
   kind: "plain" | "guided"
@@ -27,6 +65,8 @@ export type Column = {
   probing: boolean
   /** Whether the last run added any text. */
   grew?: boolean
+  /** Pieces from this index on were written in a separate "keep going" turn and are re-read with values before comparing. */
+  reprobeFrom?: number
   error?: string
 }
 
@@ -53,6 +93,7 @@ export function truncateColumn(col: Column, cut: number) {
   col.scores = col.scores.slice(0, kept)
   col.sentences = splitSentences(col.text)
   col.error = undefined
+  if ((col.reprobeFrom ?? Infinity) >= col.pieces.length) col.reprobeFrom = undefined
 }
 
 export function splitSentences(text: string): Sentence[] {
@@ -129,22 +170,32 @@ export async function runColumn(col: Column, engine: Engine, source: AsyncIterab
 }
 
 /**
- * Asks the model, given the reply so far but no values, what it would most likely say at each word, left to right,
- * so words the values changed light up as the check sweeps along.
+ * Asks the model, given the reply so far but no values, how likely each next word was, left to right, so words the values
+ * changed light up as the check sweeps along. Pieces written in a separate "keep going" turn are also re-read with values,
+ * so both distributions come from the same kind of request.
  */
 export async function probeColumn(col: Column, engine: Engine, signal: AbortSignal, onChange: () => void) {
   if (!engine.probe || col.kind !== "guided") return
-  const plain = { ...col.request, values: [] }
+  const plain = { ...col.request, values: [], more: false }
+  const guided = { ...col.request, more: false }
   col.probing = true
   onChange()
   try {
-    for (const piece of col.pieces) {
+    for (const [k, piece] of col.pieces.entries()) {
       if (signal.aborted) return
       if (piece.p === undefined || piece.plain || !col.text.slice(piece.start, piece.end).trim()) continue
-      const alts = await engine.probe(plain, col.text.slice(0, piece.start), signal)
-      if (!alts.length) continue
-      const chosen = norm(col.text.slice(piece.start, piece.end))
-      piece.plain = { top: alts[0], p: alts.find((a) => norm(a.text) === chosen)?.p }
+      const before = col.text.slice(0, piece.start)
+      if (k >= (col.reprobeFrom ?? Infinity)) {
+        const withValues = await engine.probe(guided, before, signal)
+        const word = col.text.slice(piece.start, piece.end)
+        const mine = withValues.find((a) => same(a.text, word))
+        if (withValues.length) {
+          piece.alts = withValues
+          piece.p = mine?.p ?? Math.min(piece.p, withValues.at(-1)!.p)
+        }
+      }
+      const alts = await engine.probe(plain, before, signal)
+      if (alts.length) piece.plain = alts
       onChange()
     }
   } catch (e) {
@@ -195,16 +246,16 @@ export function createColumnView(root: HTMLElement) {
     title.textContent = col.title
     root.classList.toggle("live", col.streaming || col.scoring || col.probing)
     root.classList.toggle("unscored", !scored)
-    const flips = col.pieces.filter((p) => isFlip(p, col.text)).length
+    const flips = col.pieces.filter((p) => ["changed", "boosted"].includes(influenceOf(p, col.text)?.kind ?? "")).length
     state.textContent = col.streaming
       ? "writing"
       : col.scoring
         ? "scoring"
         : col.probing
-          ? `comparing with no values · ${flips} changed`
+          ? `comparing with no values · ${flips} shifted`
           : col.error
             ? ""
-            : `${col.sentences.length} sentences${col.kind === "guided" && col.pieces.some((p) => p.plain) ? ` · ${flips} word${flips === 1 ? "" : "s"} changed by your values` : ""}`
+            : `${col.sentences.length} sentences${col.kind === "guided" && col.pieces.some((p) => p.plain) ? ` · ${flips} word${flips === 1 ? "" : "s"} shifted by your values` : ""}`
     error.hidden = !col.error
     error.textContent = col.error ?? ""
 
@@ -228,9 +279,11 @@ export function createColumnView(root: HTMLElement) {
     if (!col.sentences.length && col.streaming && !rows.querySelector(".waiting")) rows.insertAdjacentHTML("afterbegin", `<p class="waiting">Waiting for the model</p>`)
     rows.querySelectorAll<HTMLElement>(".tok:not([data-checked])").forEach((el) => {
       const piece = col.pieces[Number(el.dataset.k)]
-      if (!piece?.plain) return
+      const inf = piece && influenceOf(piece, col.text)
+      if (!inf) return
       el.dataset.checked = "1"
-      if (isFlip(piece, col.text)) el.classList.add("flip")
+      el.classList.toggle("flip", inf.kind === "changed")
+      el.classList.toggle("boost", inf.kind === "boosted")
     })
 
     const cut = reveal === null ? col.text.length : cutAfter(col.text, reveal)
@@ -310,7 +363,7 @@ function paintRow(row: HTMLElement, scores: Scores | undefined, chosen: ValueId[
     m.classList.toggle("neg", v < 0)
     m.title = scores ? `${nameOf(id)}: ${label(v)}` : nameOf(id)
   })
-  const given = scores ? chosen.filter((id) => (scores[id] ?? 0) <= -1) : []
+  const given = scores ? chosen.filter((id) => (scores[id] ?? 0) <= GIVES_UP) : []
   row.classList.toggle("gives", given.length > 0)
   const html = given.map((id) => `<span class="pin" style="--c:${colorOf(chosen, id)}">gives up ${nameOf(id).toLowerCase()}</span>`).join("")
   if (pins.innerHTML !== html) pins.innerHTML = html
@@ -337,8 +390,8 @@ function paintSummary(el: HTMLElement, col: Column, chosen: ValueId[], scored: b
   el.innerHTML = chosen
     .map((id) => {
       const m = mean(rows, id)
-      const up = rows.filter((s) => (s[id] ?? 0) >= 1).length
-      const down = rows.filter((s) => (s[id] ?? 0) <= -1).length
+      const up = rows.filter((s) => (s[id] ?? 0) >= UPHOLDS).length
+      const down = rows.filter((s) => (s[id] ?? 0) <= GIVES_UP).length
       const diff = base.length && rows.length && !col.streaming ? m - mean(base, id) : null
       const delta = diff === null || Math.abs(diff) < 0.05 ? "" : `<span class="delta ${diff > 0 ? "up" : "down"}">${diff > 0 ? "+" : "−"}${Math.abs(diff).toFixed(1)}</span>`
       const w = (Math.min(Math.abs(m), 2) / 2) * 50
@@ -352,7 +405,7 @@ function paintSummary(el: HTMLElement, col: Column, chosen: ValueId[], scored: b
 }
 
 function label(v: number) {
-  return ["clearly gives it up", "gives a little up", "not involved", "leans toward it", "clearly upholds it"][v + 2]
+  return ["clearly gives it up", "gives a little up", "not involved", "leans toward it", "clearly upholds it"][Math.max(0, Math.min(4, Math.round(v) + 2))] + ` (${v > 0 ? "+" : ""}${v.toFixed(1)})`
 }
 
 function messageOf(e: unknown) {

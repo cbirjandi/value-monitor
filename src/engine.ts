@@ -1,5 +1,5 @@
 import data from "./data.json"
-import { ApiError, generateJson, streamText } from "./gemini.ts"
+import { ApiError, decide, generateJson, streamText, type ScoreAnswer, type ScoreQuestion } from "./gemini.ts"
 import { allValues, valueOf, type Scores, type Strength, type ValueId } from "./values.ts"
 
 /** `values` empty means a plain reply with no guidance. `more` asks the model to keep going past a reply it may consider finished. */
@@ -21,6 +21,29 @@ export type Engine = {
   /** Scores the sentences at `indices` on every value, reading the others for context. */
   score?(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
+  /** A few short points on how the guided reply differs in substance from the plain one. */
+  compare?(prompt: string, plain: string, guided: string, values: ValueId[], signal: AbortSignal): Promise<string[]>
+}
+
+/** Rubric levels for scoring a sentence on a value, -2 to 2. */
+const LEVELS = ["Clearly sacrifices or works against this value", "Gives a little of it up", "Not involved", "Leans toward it", "Clearly upholds it"]
+
+/** The expected level from Gemini Decision 1's probabilities, so scores are calibrated and continuous rather than rounded. */
+function expectedOf(a: ScoreAnswer | undefined): number {
+  if (!a) return 0
+  const entries = Object.entries(a.probabilities ?? {})
+  const numeric = entries.length > 0 && entries.every(([k]) => /^\d+$/.test(k))
+  const oneBased = numeric && !entries.some(([k]) => k === "0") && entries.some(([k]) => k === String(LEVELS.length))
+  let sum = 0
+  let total = 0
+  for (const [k, p] of entries) {
+    let level = numeric ? Number(k) - (oneBased ? 1 : 0) : LEVELS.indexOf(a.legend?.[k] ?? k)
+    if (level < 0 || level >= LEVELS.length) continue
+    sum += p * (level - 2)
+    total += p
+  }
+  if (total > 0) return sum / total
+  return Number.isFinite(a.score) ? Math.max(-2, Math.min(2, a.score - 2)) : 0
 }
 
 export const EXAMPLES = data.dilemmas as { title: string; a: ValueId; b: ValueId; prompt: string; ra: string; rb: string }[]
@@ -47,8 +70,28 @@ function valueKeys() {
   return { values, keys: values.map((_, i) => `v${i}`), list: values.map((v, i) => `- v${i} (${v.name}): ${v.principle}`).join("\n") }
 }
 
+/** Set once Gemini Decision 1 is unavailable for this key, so later scoring goes straight to the text model. */
+let decisionsUnavailable = false
+
 export function geminiEngine(key: string, model: string): Engine {
   const call = <T>(user: string, schema: object, signal: AbortSignal) => withRetry(() => generateJson<T>({ key, model, user, temperature: 0, schema, signal }), signal)
+
+  /** Scores with Gemini Decision 1: one rubric question per sentence and value, answered as calibrated probabilities in one pass. */
+  async function scoreWithDecisions(prompt: string, sentences: string[], indices: number[], signal: AbortSignal) {
+    const values = allValues()
+    const input = `USER MESSAGE\n${prompt}\n\nAI ASSISTANT'S REPLY, ONE SENTENCE PER LINE\n${sentences.map((s, i) => `[${i}] ${s}`).join("\n")}`
+    const questions: Record<string, ScoreQuestion> = {}
+    for (const i of indices)
+      values.forEach((v, k) => {
+        questions[`s${i}_v${k}`] = {
+          type: "score",
+          instructions: `How does reply sentence [${i}] treat the value "${v.name}" (${v.principle})? Judge it in the context of the user's message and the rest of the reply.`,
+          criteria: LEVELS,
+        }
+      })
+    const answers = await withRetry(() => decide(key, input, questions, signal), signal)
+    return new Map(indices.map((i) => [i, Object.fromEntries(values.map((v, k) => [v.id, expectedOf(answers[`s${i}_v${k}`])]))] as [number, Scores]))
+  }
   return {
     label: model,
     kind: "gemini",
@@ -70,6 +113,14 @@ export function geminiEngine(key: string, model: string): Engine {
       if (head) yield { text: joinAfter(prefix, withoutEcho(prefix, head)) }
     },
     async score(prompt, sentences, indices, signal) {
+      if (!decisionsUnavailable) {
+        try {
+          return await scoreWithDecisions(prompt, sentences, indices, signal)
+        } catch (e) {
+          if (signal.aborted || (e instanceof ApiError && e.status === 429)) throw e
+          decisionsUnavailable = true
+        }
+      }
       const { values, keys, list } = valueKeys()
       const schema = {
         type: "OBJECT",
@@ -96,6 +147,19 @@ export function geminiEngine(key: string, model: string): Engine {
         result.set(i, Object.fromEntries(values.map((v, k) => [v.id, clamp(Number(row?.[keys[k]] ?? 0))])))
       })
       return result
+    },
+    async compare(prompt, plain, guided, values, signal) {
+      const schema = { type: "OBJECT", properties: { points: { type: "ARRAY", items: { type: "STRING" } } }, required: ["points"] }
+      const user = [
+        `Two AI replies answer the same message. Reply B was told to hold these values: ${values.map((id) => valueOf(id).name).join(", ")}. Reply A had no values.`,
+        "List the two or three most important differences in substance: the advice given, facts or risks mentioned or left out, commitments, and who the reply serves. Ignore wording and style unless it changes the meaning.",
+        "Each point is one plain sentence under 22 words that names what Reply B does differently. No preamble.",
+        `MESSAGE\n${prompt}`,
+        `REPLY A (NO VALUES)\n${plain}`,
+        `REPLY B (WITH VALUES)\n${guided}`,
+      ].join("\n\n")
+      const out = await call<{ points?: string[] }>(user, schema, signal)
+      return (out.points ?? []).map((p) => p.trim()).filter(Boolean).slice(0, 3)
     },
     async drivers(prompt, signal) {
       const { values, keys, list } = valueKeys()
@@ -173,6 +237,16 @@ export const simEngine: Engine = {
         return [i, scores]
       }),
     )
+  },
+  async compare(prompt, _plain, _guided, values, signal) {
+    await sleep(700, signal)
+    const d = EXAMPLES.find((x) => x.prompt === prompt)
+    if (!d) return []
+    const lead = values.includes(d.a) && (!values.includes(d.b) || values.indexOf(d.a) < values.indexOf(d.b)) ? d.a : d.b
+    return [
+      `The guided reply leans on ${valueOf(lead).name.toLowerCase()}: it ${lead === d.a ? "states the hard facts more directly" : "puts the person's situation first"}.`,
+      "Sim mode shows a canned comparison; add a Gemini key in Settings for a real one.",
+    ]
   },
   async drivers(prompt, signal) {
     await sleep(500, signal)

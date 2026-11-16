@@ -52,35 +52,39 @@ const EXAMPLE_ASK = "My coworker keeps taking credit for my ideas in meetings. W
 const EXAMPLE_REPLY =
   "Start by sending a short recap email after you share an idea, so there is a record with your name on it. If it keeps happening, raise it with your coworker directly and calmly. Bring in your manager only if that doesn't work."
 
+type Turn = { role: "user" | "assistant"; text: string }
+
 /**
- * Each family's own chat format, with the example exchange, ending where the reply (and any forced beginning) goes.
+ * Each family's own chat format: the conversation so far, then an open assistant turn that the reply (and any forced beginning) goes into.
  * WebLLM adds the model's start-of-text token itself, so it is not written here.
  */
-const FORMATS: Record<Family, { prompt: (system: string, ask: string, prefix: string) => string; stop: string[] }> = {
+const FORMATS: Record<Family, { render: (system: string, turns: Turn[], open: string) => string; stop: string[] }> = {
   qwen: {
-    prompt: (system, ask, prefix) =>
-      `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${EXAMPLE_ASK}<|im_end|>\n<|im_start|>assistant\n${EXAMPLE_REPLY}<|im_end|>\n<|im_start|>user\n${ask}<|im_end|>\n<|im_start|>assistant\n${prefix}`,
+    render: (system, turns, open) =>
+      `<|im_start|>system\n${system}<|im_end|>\n` + turns.map((t) => `<|im_start|>${t.role}\n${t.text}<|im_end|>\n`).join("") + `<|im_start|>assistant\n${open}`,
     stop: ["<|im_end|>", "<|endoftext|>"],
   },
   llama: {
-    prompt: (system, ask, prefix) =>
-      `<|start_header_id|>system<|end_header_id|>\n\n${system}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n${EXAMPLE_ASK}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n${EXAMPLE_REPLY}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n${ask}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n${prefix}`,
+    render: (system, turns, open) =>
+      `<|start_header_id|>system<|end_header_id|>\n\n${system}<|eot_id|>` +
+      turns.map((t) => `<|start_header_id|>${t.role}<|end_header_id|>\n\n${t.text}<|eot_id|>`).join("") +
+      `<|start_header_id|>assistant<|end_header_id|>\n\n${open}`,
     stop: ["<|eot_id|>", "<|end_of_text|>"],
   },
   gemma: {
-    // Gemma has no system role; instructions go in the first user turn.
-    prompt: (system, ask, prefix) =>
-      `<start_of_turn>user\n${system}\n\n${EXAMPLE_ASK}<end_of_turn>\n<start_of_turn>model\n${EXAMPLE_REPLY}<end_of_turn>\n<start_of_turn>user\n${ask}<end_of_turn>\n<start_of_turn>model\n${prefix}`,
+    // Gemma has no system role; instructions lead the first user turn.
+    render: (system, turns, open) =>
+      turns.map((t, i) => `<start_of_turn>${t.role === "user" ? "user" : "model"}\n${i === 0 ? `${system}\n\n` : ""}${t.text}<end_of_turn>\n`).join("") + `<start_of_turn>model\n${open}`,
     stop: ["<end_of_turn>", "<eos>"],
   },
   phi: {
-    prompt: (system, ask, prefix) =>
-      `<|system|>\n${system}<|end|>\n<|user|>\n${EXAMPLE_ASK}<|end|>\n<|assistant|>\n${EXAMPLE_REPLY}<|end|>\n<|user|>\n${ask}<|end|>\n<|assistant|>\n${prefix}`,
+    render: (system, turns, open) => `<|system|>\n${system}<|end|>\n` + turns.map((t) => `<|${t.role}|>\n${t.text}<|end|>\n`).join("") + `<|assistant|>\n${open}`,
     stop: ["<|end|>", "<|endoftext|>"],
   },
   mistral: {
     // Mistral has no system role either; instructions lead the first instruction block.
-    prompt: (system, ask, prefix) => `[INST] ${system}\n\n${EXAMPLE_ASK}[/INST] ${EXAMPLE_REPLY}</s>[INST] ${ask}[/INST] ${prefix}`,
+    render: (system, turns, open) =>
+      turns.map((t, i) => (t.role === "user" ? `[INST] ${i === 0 ? `${system}\n\n` : ""}${t.text}[/INST]` : ` ${t.text}</s>`)).join("") + ` ${open}`,
     stop: ["</s>", "[INST]"],
   },
 }
@@ -89,20 +93,43 @@ function formatOf(id: string) {
   return FORMATS[LOCAL_MODELS.find((m) => m.id === id)?.family ?? "qwen"]
 }
 
-/** Sampling is mildly focused, so differences between replies come mostly from the prompt rather than chance. */
-const SAMPLING = { temperature: 0.7, top_p: 0.9, repetition_penalty: 1.1 }
+const KEEP_GOING = "Please continue your answer with two or three more sentences that add new detail, reasons or next steps. Don't repeat what you already said."
+
+/**
+ * The conversation for a request. A normal request leaves the reply's beginning (`prefix`) in the open turn for the model to finish.
+ * Asking for more puts the whole reply in a finished turn and asks, in a new one, to keep going: small models often just stop otherwise.
+ */
+function conversationOf(req: WriteRequest, prefix: string): { turns: Turn[]; open: string } {
+  const turns: Turn[] = [
+    { role: "user", text: EXAMPLE_ASK },
+    { role: "assistant", text: EXAMPLE_REPLY },
+    { role: "user", text: req.prompt },
+  ]
+  if (req.more && prefix.trim()) return { turns: [...turns, { role: "assistant", text: prefix.trim() }, { role: "user", text: KEEP_GOING }], open: "" }
+  return { turns, open: prefix }
+}
+
+/**
+ * Plain sampling with no repetition or frequency penalties, so the probability shown for a word while writing is the same
+ * distribution the no-values check reads afterward; the two can be compared directly.
+ */
+const SAMPLING = { temperature: 0.7, top_p: 0.9, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0 }
 
 /** A small model running in this browser writes the replies, with every token's probability. Scoring, if any, comes from `scorer`. */
 export function localEngine(id: string, scorer: Engine | null, onProgress: (p: Progress) => void): Engine {
   const name = LOCAL_MODELS.find((m) => m.id === id)?.name ?? id
   const format = formatOf(id)
-  const promptOf = (req: WriteRequest, prefix: string) => format.prompt(systemPromptOf(req), req.prompt, prefix)
+  const promptOf = (req: WriteRequest, prefix: string) => {
+    const { turns, open } = conversationOf(req, prefix)
+    return format.render(systemPromptOf({ ...req, more: false }), turns, open)
+  }
   const ready = loadModel(id, onProgress)
   return {
     label: `${name} · in browser`,
     kind: "local",
     score: scorer?.score,
     drivers: scorer?.drivers,
+    compare: scorer?.compare,
     async *write(req, signal, prefix = "") {
       const llm = await ready
       const release = await turn()
@@ -120,13 +147,20 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
           max_tokens: 160,
           stop: format.stop,
         })
+        // A new turn starts without a space, so the first piece of "more" gets one to join the reply.
+        let needsSpace = !!req.more && !!prefix && !/\s$/.test(prefix)
+        const joined = (piece: Piece): Piece => {
+          if (!needsSpace || !piece.text.trim()) return piece
+          needsSpace = false
+          return /^\s/.test(piece.text) ? piece : { ...piece, text: ` ${piece.text}` }
+        }
         for await (const chunk of stream) {
           if (signal.aborted) break
           const choice = chunk.choices[0]
           if (!choice?.text) continue
           const tokens = choice.logprobs?.content ?? []
-          if (tokens.length && tokens.map((t) => t.token).join("") === choice.text) for (const t of tokens) yield pieceOf(t)
-          else yield tokens.length ? { ...pieceOf(tokens[tokens.length - 1]), text: choice.text } : { text: choice.text }
+          if (tokens.length && tokens.map((t) => t.token).join("") === choice.text) for (const t of tokens) yield joined(pieceOf(t))
+          else yield joined(tokens.length ? { ...pieceOf(tokens[tokens.length - 1]), text: choice.text } : { text: choice.text })
         }
         finished = true
       } finally {
@@ -141,7 +175,7 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
       const release = await turn()
       try {
         if (signal.aborted) return []
-        const out = await llm.completions.create({ prompt: promptOf(req, prefix), stream: false, logprobs: true, top_logprobs: 5, ...SAMPLING, max_tokens: 1 })
+        const out = await llm.completions.create({ prompt: promptOf(req, prefix), stream: false, logprobs: true, top_logprobs: 5, ...SAMPLING, max_tokens: 1, stop: format.stop })
         const first = out.choices[0]?.logprobs?.content?.[0]
         return (first?.top_logprobs ?? []).map((a) => ({ text: a.token, p: Math.exp(a.logprob) })).sort((a, b) => b.p - a.p)
       } finally {
