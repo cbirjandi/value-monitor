@@ -1,5 +1,5 @@
 import { countWords, createColumnView, cutAfter, influenceOf, newColumn, probeColumn, runColumn, truncateColumn, type Column, type Influence } from "./column.ts"
-import { EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine } from "./engine.ts"
+import { DEFAULT_TEMPERATURE, EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { addCustomValue, allValues, colorOf, MAX_CHOSEN, nameOf, removeCustomValue, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
@@ -14,15 +14,16 @@ const promptEdit = $<HTMLTextAreaElement>("prompt")
 const chipsEl = $("chips")
 const strengthEl = $("strength")
 const compare = $<HTMLInputElement>("compare")
-const confidence = $<HTMLInputElement>("confidence")
 const output = $("output")
 const statusEl = $("status")
 const focusNote = $("focus-note")
 const popover = $("popover")
 const loadBar = $("load-bar")
 
-type Ui = { prompt: string; example: number; chosen: ValueId[]; strength: Strength; compare: boolean; confidence: boolean }
-const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: ["candor", "kindness"], strength: "firm", compare: true, confidence: true, ...loadUi() }
+type Highlight = "values" | "doubt" | "off"
+type Ui = { prompt: string; example: number; chosen: ValueId[]; strength: Strength; compare: boolean; highlight: Highlight; temperature: number; amplify: number }
+const TUNE_DEFAULTS = { highlight: "values" as Highlight, temperature: DEFAULT_TEMPERATURE, amplify: 0 }
+const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: ["candor", "kindness"], strength: "firm", compare: true, ...TUNE_DEFAULTS, ...loadUi() }
 
 let progress: Progress | null = null
 let engine: Engine = engineFromStorage()
@@ -42,7 +43,6 @@ bindAddForm()
 renderStrength()
 renderPrompt()
 compare.checked = ui.compare
-confidence.checked = ui.confidence
 renderEmpty()
 updateEngineUi()
 bindSettings()
@@ -69,7 +69,7 @@ $("shuffle").addEventListener("click", () => {
 })
 $("run").addEventListener("click", run)
 compare.addEventListener("change", () => ((ui.compare = compare.checked), saveUi(), scheduleRerun()))
-confidence.addEventListener("change", () => ((ui.confidence = confidence.checked), saveUi(), updateEngineUi()))
+bindTune()
 output.addEventListener("click", onTokenClick)
 document.addEventListener("click", (e) => {
   const t = e.target as HTMLElement
@@ -92,7 +92,7 @@ function run() {
   const { signal } = controller
   setStatus("")
 
-  const plainId = `${engine.label}\n${prompt}`
+  const plainId = `${engine.label}\n${ui.temperature}\n${prompt}`
   const jobs: Promise<void>[] = []
   const cols: Column[] = []
   if (ui.compare || !ui.chosen.length) {
@@ -100,13 +100,13 @@ function run() {
     const covers = (c: Column) => ui.chosen.every((id) => c.scores.every((sc) => !sc || id in sc))
     if (cached && !cached.error && covers(cached)) cols.push(cached)
     else {
-      const col = newColumn("plain", "No values", { prompt, values: [], strength: ui.strength })
+      const col = newColumn("plain", "No values", requestOf(prompt, []))
       cols.push(col)
       jobs.push(runColumn(col, engine, tidy(engine.write(col.request, signal)), signal, paint).then(() => void (!col.error && !signal.aborted && plainCache.set(plainId, col))))
     }
   }
   if (ui.chosen.length) {
-    const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))}`, { prompt, values: ui.chosen, strength: ui.strength })
+    const col = newColumn("guided", guidedTitle(), requestOf(prompt, ui.chosen))
     cols.push(col)
     jobs.push(runColumn(col, engine, tidy(engine.write(col.request, signal)), signal, paint))
   }
@@ -221,10 +221,8 @@ function grow(mode: "extend" | "regrow" | "revalue", only?: Slot) {
     // Text written in a separate "keep going" turn is re-read before comparing (see probeColumn).
     if (mode === "extend" && engine.kind === "local") col.reprobeFrom = Math.min(col.reprobeFrom ?? Infinity, col.pieces.length)
     if (mode !== "extend") truncateColumn(col, cutAfter(col.text, reveal ?? countWords(col.text)))
-    if (col.kind === "guided") {
-      col.request = { prompt: col.request.prompt, values: ui.chosen, strength: ui.strength }
-      col.title = `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))}`
-    }
+    col.request = requestOf(col.request.prompt, col.kind === "guided" ? ui.chosen : [])
+    if (col.kind === "guided") col.title = guidedTitle()
     const request = { ...col.request, more: mode === "extend" }
     jobs.push(runColumn(col, engine, tidy(engine.write(request, signal, col.text), col.text), signal, paint))
   }
@@ -237,6 +235,16 @@ function grow(mode: "extend" | "regrow" | "revalue", only?: Slot) {
       setStatus(engine.kind === "sim" ? "Sim mode can't write more. Open Settings to use a real model." : "The model had nothing more to add here.")
     compareWords(signal)
   })
+}
+
+/** A request with the current tuning. Amplification only applies where it can: in-browser models, with values. */
+function requestOf(prompt: string, values: ValueId[]): WriteRequest {
+  return { prompt, values, strength: ui.strength, temperature: ui.temperature, amplify: engine.kind === "local" && values.length ? ui.amplify : 0 }
+}
+
+function guidedTitle() {
+  const amp = engine.kind === "local" && ui.amplify > 0 ? ` · amplified ×${ui.amplify}` : ""
+  return `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))}${amp}`
 }
 
 function settle(jobs: Promise<void>[], signal: AbortSignal) {
@@ -344,7 +352,7 @@ function onTokenClick(e: MouseEvent) {
     <p class="pop-head">${piece.forced ? "You picked" : "The model wrote"} <b>${shown(chosenText)}</b></p>
     ${inf ? `<p class="pop-plain ${inf.kind}">${explain(inf)}</p>` : ""}
     <div class="pop-grid${two ? " two" : ""}">
-      <span class="pop-colhead"></span>${two ? `<span class="pop-colhead">with values</span><span class="pop-colhead">no values</span>` : `<span class="pop-colhead">probability</span>`}
+      <span class="pop-colhead"></span>${two ? `<span class="pop-colhead">with values${piece.amplified ? ` ×${piece.amplified}` : ""}</span><span class="pop-colhead">no values</span>` : `<span class="pop-colhead">probability</span>`}
       ${rows
         .map(
           (a, i) => `<button type="button" class="pop-row${a.text === chosenText ? " picked" : ""}" data-i="${i}" ${a.text === chosenText || !canBranch ? "disabled" : ""} title="${a.text === chosenText ? "The word in the reply" : "Rewrite the rest of the reply starting from this word"}">
@@ -368,11 +376,12 @@ function onTokenClick(e: MouseEvent) {
 /** One plain sentence on what the two distributions say about this word. */
 function explain(inf: Influence) {
   const w = `<b>${shown(inf.word)}</b>`
+  const times = inf.lift >= 1 ? ` (${Math.round(2 ** inf.lift * 10) / 10}× likelier)` : ""
   const topWithout = inf.withoutValues[0]
   const without = inf.pWithout === undefined ? "under " + pct(inf.withoutValues.at(-1)?.p ?? 0) : pct(inf.pWithout)
   if (inf.kind === "changed")
-    return `Your values changed the model's first choice here. With no values it would most likely write <b>${shown(topWithout.text)}</b> (${pct(topWithout.p)}); with your values ${w} went from ${without} to ${pct(inf.pWith)}.`
-  if (inf.kind === "boosted") return `Same first choice either way, but your values made ${w} more likely: ${without} → ${pct(inf.pWith)}.`
+    return `Your values changed the model's first choice here. With no values it would most likely write <b>${shown(topWithout.text)}</b> (${pct(topWithout.p)}); with your values ${w} went from ${without} to ${pct(inf.pWith)}${times}.`
+  if (inf.kind === "boosted") return `Same first choice either way, but your values made ${w} more likely: ${without} → ${pct(inf.pWith)}${times}.`
   if (inf.kind === "chance")
     return `This word was the model's #${inf.rank} option, picked by chance (the model samples, it doesn't always take the top word). Its first choice with your values was <b>${shown(inf.withValues[0].text)}</b>.`
   return `Your values made little difference here: ${without} without them, ${pct(inf.pWith)} with them.`
@@ -575,6 +584,61 @@ function listOf(items: string[]) {
   return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`
 }
 
+/* Tuning: what to highlight, temperature, and value amplification */
+
+function bindTune() {
+  const panel = $("tune")
+  const btn = $("tune-btn")
+  const toggle = (open: boolean) => {
+    panel.hidden = !open
+    btn.setAttribute("aria-expanded", String(open))
+  }
+  btn.addEventListener("click", (e) => (e.stopPropagation(), toggle(panel.hidden)))
+  document.addEventListener("click", (e) => !panel.hidden && !panel.contains(e.target as Node) && toggle(false))
+  document.addEventListener("keydown", (e) => e.key === "Escape" && toggle(false))
+  $("highlight").querySelectorAll<HTMLButtonElement>("button").forEach((b) =>
+    b.addEventListener("click", () => {
+      ui.highlight = b.dataset.v as Highlight
+      saveUi()
+      updateEngineUi()
+      paint()
+    }),
+  )
+  const temp = $<HTMLInputElement>("temperature")
+  const amp = $<HTMLInputElement>("amplify")
+  temp.addEventListener("input", () => ((ui.temperature = Number(temp.value)), saveUi(), paintTune()))
+  amp.addEventListener("input", () => ((ui.amplify = Number(amp.value)), saveUi(), paintTune()))
+  temp.addEventListener("change", () => slots.length && run())
+  amp.addEventListener("change", () => slots.length && scheduleRerun())
+  $("tune-reset").addEventListener("click", () => {
+    const rerun = ui.temperature !== TUNE_DEFAULTS.temperature || ui.amplify !== TUNE_DEFAULTS.amplify
+    Object.assign(ui, TUNE_DEFAULTS)
+    saveUi()
+    updateEngineUi()
+    paint()
+    if (rerun && slots.length) run()
+  })
+}
+
+function paintTune() {
+  const local = engine.kind === "local"
+  $("highlight").querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+    b.setAttribute("aria-checked", String(b.dataset.v === ui.highlight))
+    b.disabled = !local
+  })
+  $("highlight-note").textContent = local ? "" : "Word-level highlights need an in-browser model, which shares its probabilities."
+  $<HTMLInputElement>("temperature").value = String(ui.temperature)
+  $("temperature-out").textContent = ui.temperature.toFixed(1)
+  const amp = $<HTMLInputElement>("amplify")
+  amp.value = String(ui.amplify)
+  amp.disabled = !local
+  $("amplify-out").textContent = ui.amplify > 0 ? `×${ui.amplify}` : "off"
+  $("amplify-note").textContent = local
+    ? "Pushes each word further in the direction your values move the model. Each word takes two model calls, so it writes more slowly."
+    : "Needs an in-browser model: it works from the model's word probabilities."
+  $("tune-btn").classList.toggle("active", ui.temperature !== TUNE_DEFAULTS.temperature || (local && ui.amplify > 0))
+}
+
 /* Engines and settings */
 
 function savedKind(): EngineKind {
@@ -607,7 +671,11 @@ function paintHint() {
   hint.hidden = !slots.length
   hint.innerHTML =
     `Drag <span class="key-knob"></span> back for a new ending, or click it at the end for more` +
-    (local && ui.confidence ? ` · <span class="key-shade">shaded</span> model hesitated · <span class="key-flip">colored</span> values changed its first choice · <span class="key-boost">underlined</span> values made the word likelier` : "")
+    (local && ui.highlight === "values"
+      ? ` · <span class="key-lift">purple</span> = how much likelier your values made a word · <span class="key-flip">colored</span> = values changed its first choice`
+      : local && ui.highlight === "doubt"
+        ? ` · <span class="key-shade">shaded</span> = where the model hesitated`
+        : "")
 }
 
 function onProgress(p: Progress) {
@@ -629,9 +697,11 @@ function updateEngineUi() {
   $("model-btn").classList.toggle("loading", loading)
   loadBar.hidden = !loading
   loadBar.style.setProperty("--p", String(progress?.fraction ?? 0))
-  $("conf-toggle").hidden = !local
   paintHint()
-  output.classList.toggle("conf", local && ui.confidence)
+  output.classList.toggle("conf", local && ui.highlight === "doubt")
+  output.classList.toggle("infl", local && ui.highlight === "values")
+  output.classList.toggle("plainview", !local || ui.highlight === "off")
+  paintTune()
 }
 
 function bindSettings() {

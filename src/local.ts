@@ -1,5 +1,5 @@
 import type { WebWorkerMLCEngine } from "@mlc-ai/web-llm"
-import { systemPromptOf, type Alt, type Engine, type Piece, type WriteRequest } from "./engine.ts"
+import { DEFAULT_TEMPERATURE, systemPromptOf, type Alt, type Engine, type Piece, type WriteRequest } from "./engine.ts"
 
 type Family = "qwen" | "llama" | "gemma" | "phi" | "mistral"
 
@@ -113,7 +113,10 @@ function conversationOf(req: WriteRequest, prefix: string): { turns: Turn[]; ope
  * Plain sampling with no repetition or frequency penalties, so the probability shown for a word while writing is the same
  * distribution the no-values check reads afterward; the two can be compared directly.
  */
-const SAMPLING = { temperature: 0.7, top_p: 0.9, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0 }
+const samplingOf = (req: WriteRequest) => ({ temperature: req.temperature ?? DEFAULT_TEMPERATURE, top_p: 0.9, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0 })
+
+/** Longest an amplified reply runs per request, in words. */
+const AMPLIFIED_MAX_TOKENS = 90
 
 /** A small model running in this browser writes the replies, with every token's probability. Scoring, if any, comes from `scorer`. */
 export function localEngine(id: string, scorer: Engine | null, onProgress: (p: Progress) => void): Engine {
@@ -124,6 +127,56 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
     return format.render(systemPromptOf({ ...req, more: false }), turns, open)
   }
   const ready = loadModel(id, onProgress)
+  /** The model's top five next tokens for a prompt, most likely first, at the request's temperature. */
+  async function nextWords(llm: Llm, prompt: string, req: WriteRequest): Promise<Alt[]> {
+    const out = await llm.completions.create({ prompt, stream: false, logprobs: true, top_logprobs: 5, ...samplingOf(req), max_tokens: 1, stop: format.stop })
+    const first = out.choices[0]?.logprobs?.content?.[0]
+    return (first?.top_logprobs ?? []).map((a) => ({ text: a.token, p: Math.exp(a.logprob) })).sort((a, b) => b.p - a.p)
+  }
+
+  /**
+   * Value amplification, after classifier-free guidance: at each step, read the next-word probabilities with the values (pv)
+   * and without them (p0), score every candidate as log pv + γ·(log pv − log p0), and sample from those scores.
+   * γ = 0 is ordinary writing with values; larger γ exaggerates whatever the values change. Only the top five candidates
+   * of each are known, so a word missing from one list is given that list's smallest probability.
+   * Each word costs two model calls, so this writes more slowly.
+   */
+  async function* amplified(llm: Llm, req: WriteRequest, prefix: string, signal: AbortSignal): AsyncIterable<Piece> {
+    const gamma = req.amplify ?? 0
+    const plainReq = { ...req, values: [] }
+    let text = prefix
+    let needsSpace = !!req.more && !!prefix && !/\s$/.test(prefix)
+    for (let step = 0; step < AMPLIFIED_MAX_TOKENS && !signal.aborted; step++) {
+      const withValues = await nextWords(llm, promptOf(req, text), req)
+      const without = await nextWords(llm, promptOf(plainReq, text), req)
+      if (!withValues.length) return
+      const floorV = withValues.at(-1)!.p
+      const floor0 = without.at(-1)?.p ?? floorV
+      const candidates = [...new Set([...withValues, ...without].map((a) => a.text))]
+      const scored = candidates.map((t) => {
+        const pv = withValues.find((a) => a.text === t)?.p ?? floorV
+        const p0 = without.find((a) => a.text === t)?.p ?? floor0
+        return { text: t, score: Math.log(pv) + gamma * (Math.log(pv) - Math.log(p0)) }
+      })
+      const max = Math.max(...scored.map((c) => c.score))
+      const weights = scored.map((c) => Math.exp(c.score - max))
+      const total = weights.reduce((a, b) => a + b, 0)
+      const dist: Alt[] = scored.map((c, i) => ({ text: c.text, p: weights[i] / total })).sort((a, b) => b.p - a.p)
+      let r = Math.random()
+      const pick = dist.find((a) => (r -= a.p) <= 0) ?? dist[0]
+      if (!pick.text || isStop(pick.text)) return
+      let out = pick.text
+      if (needsSpace && out.trim()) {
+        needsSpace = false
+        if (!/^\s/.test(out)) out = ` ${out}`
+      }
+      text += pick.text
+      yield { text: out, p: pick.p, alts: dist.slice(0, 6), plain: without, amplified: gamma }
+    }
+  }
+
+  const isStop = (t: string) => /<\|[^|]*\|>|<\/s>|<end_of_turn>|<eos>|\[INST\]/.test(t)
+
   return {
     label: `${name} · in browser`,
     kind: "local",
@@ -138,12 +191,17 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
       let finished = false
       try {
         if (signal.aborted) return
+        if ((req.amplify ?? 0) > 0 && req.values.length) {
+          yield* amplified(llm, req, prefix, signal)
+          finished = true
+          return
+        }
         const stream = await llm.completions.create({
           prompt: promptOf(req, prefix),
           stream: true,
           logprobs: true,
           top_logprobs: 5,
-          ...SAMPLING,
+          ...samplingOf(req),
           max_tokens: 160,
           stop: format.stop,
         })
@@ -175,9 +233,7 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
       const release = await turn()
       try {
         if (signal.aborted) return []
-        const out = await llm.completions.create({ prompt: promptOf(req, prefix), stream: false, logprobs: true, top_logprobs: 5, ...SAMPLING, max_tokens: 1, stop: format.stop })
-        const first = out.choices[0]?.logprobs?.content?.[0]
-        return (first?.top_logprobs ?? []).map((a) => ({ text: a.token, p: Math.exp(a.logprob) })).sort((a, b) => b.p - a.p)
+        return await nextWords(llm, promptOf(req, prefix), req)
       } finally {
         release()
       }
@@ -188,6 +244,8 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
 export type { Alt }
 
 type TokenLogprob = { token: string; logprob: number; top_logprobs?: { token: string; logprob: number }[] }
+type Llm = WebWorkerMLCEngine
+
 
 function pieceOf(t: TokenLogprob): Piece {
   return { text: t.token, p: Math.exp(t.logprob), alts: (t.top_logprobs ?? []).map((a) => ({ text: a.token, p: Math.exp(a.logprob) })) }

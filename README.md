@@ -32,6 +32,14 @@ Open **Settings** (the gear) and choose who writes the replies:
 * **Gemini**: Google's model writes and scores. Needs a free API key.
 * **In this browser**: a small open-weight model (Qwen, Llama, Gemma, Phi or Mistral, from 0.5B to 8B parameters) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; each word is classed from the two distributions at that point: colored if the values changed the model's first choice, underlined if they made the word at least twice as likely, and left plain if the model just sampled a lower-ranked word by chance. Clicking a word shows both distributions side by side. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
 
+## Tune
+
+The **Tune** button opens three settings:
+
+* **Highlight words by**: *Value influence* shades every word by how many times likelier your values made it (log scale, deepest at 16×), with words whose first choice changed in purple text; *Uncertainty* shades where the model hesitated; or nothing.
+* **Temperature** (0.1 to 1.5): how freely the model samples. Lower is more predictable and repeatable.
+* **Value amplification** (in-browser models): classifier-free guidance. At each word the model's probabilities with values (pv) and without (p0) are combined as log pv + γ·(log pv − log p0), so whatever the values change gets exaggerated. Each word takes two model calls, so it writes more slowly.
+
 ## How it works
 
 | Step | What happens | File |

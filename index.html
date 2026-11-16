@@ -51,7 +51,34 @@
             <button type="button" role="radio" data-v="firm">Firm</button>
             <button type="button" role="radio" data-v="strict">Strict</button>
           </div>
-          <label class="toggle" id="conf-toggle" hidden><input type="checkbox" id="confidence" checked /><span class="track"></span>Confidence</label>
+          <div class="tune-wrap">
+            <button type="button" id="tune-btn" class="tune-btn" aria-expanded="false" aria-controls="tune">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+              Tune
+            </button>
+            <div id="tune" class="tune" role="dialog" aria-label="Tune" hidden>
+              <div class="tune-row" id="highlight-row">
+                <span class="tune-label">Highlight words by</span>
+                <div id="highlight" class="seg wide" role="radiogroup" aria-label="Highlight words by">
+                  <button type="button" role="radio" data-v="values">Value influence</button>
+                  <button type="button" role="radio" data-v="doubt">Uncertainty</button>
+                  <button type="button" role="radio" data-v="off">Nothing</button>
+                </div>
+                <small id="highlight-note"></small>
+              </div>
+              <label class="tune-row" for="temperature">
+                <span class="tune-label">Temperature <b id="temperature-out"></b></span>
+                <input type="range" id="temperature" min="0.1" max="1.5" step="0.1" />
+                <small>Lower writes the most likely words; higher samples more freely and varies more between runs.</small>
+              </label>
+              <label class="tune-row" for="amplify" id="amplify-row">
+                <span class="tune-label">Value amplification <b id="amplify-out"></b></span>
+                <input type="range" id="amplify" min="0" max="4" step="0.5" />
+                <small id="amplify-note"></small>
+              </label>
+              <button type="button" id="tune-reset" class="link">Reset to defaults</button>
+            </div>
+          </div>
           <label class="toggle"><input type="checkbox" id="compare" checked /><span class="track"></span>Compare</label>
           <button type="button" id="run" class="run">Run</button>
         </div>

@@ -2,13 +2,19 @@ import data from "./data.json"
 import { ApiError, decide, generateJson, streamText, type ScoreAnswer, type ScoreQuestion } from "./gemini.ts"
 import { allValues, valueOf, type Scores, type Strength, type ValueId } from "./values.ts"
 
-/** `values` empty means a plain reply with no guidance. `more` asks the model to keep going past a reply it may consider finished. */
-export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength; more?: boolean }
+/**
+ * `values` empty means a plain reply with no guidance. `more` asks the model to keep going past a reply it may consider finished.
+ * `temperature` sets how freely the model samples. `amplify` (in-browser models only) pushes each word further in the direction
+ * the values move the model's probabilities; 0 is off.
+ */
+export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength; more?: boolean; temperature?: number; amplify?: number }
+
+export const DEFAULT_TEMPERATURE = 0.7
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
 export type Driver = { phrase: string; value: ValueId }
 export type Alt = { text: string; p: number }
 /** A piece of streamed text. Models that expose probabilities send one per token, with the chosen token's probability and the top alternatives. */
-export type Piece = { text: string; p?: number; alts?: Alt[] }
+export type Piece = { text: string; p?: number; alts?: Alt[]; plain?: Alt[]; amplified?: number }
 
 /** Where replies and scores come from: Gemini, a small model in the browser, or canned replies for trying the app without setup. */
 export type Engine = {
@@ -100,7 +106,7 @@ export function geminiEngine(key: string, model: string): Engine {
         ? `${req.prompt}\n\n---\nYour reply so far is below. Continue it from its last word${req.more ? " with the next two or three sentences" : ""}. Output only the new words that come next; never repeat any of it.\n\n${prefix}`
         : req.prompt
       let head: string | undefined = prefix ? "" : undefined
-      for await (const text of streamText({ key, model, system: systemPromptOf(req), user, temperature: 0.7, signal })) {
+      for await (const text of streamText({ key, model, system: systemPromptOf(req), user, temperature: req.temperature ?? DEFAULT_TEMPERATURE, signal })) {
         if (head === undefined) {
           yield { text }
           continue

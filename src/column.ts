@@ -7,7 +7,7 @@ export type Sentence = { text: string; start: number; end: number }
  * Where a streamed piece sits in the column's text; `forced` marks a word the user picked to rewrite from.
  * `p` and `alts` are the model's probabilities for this position with the column's values; `plain` holds them with no values.
  */
-export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; plain?: Alt[] }
+export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; plain?: Alt[]; amplified?: number }
 
 /**
  * How the values bear on one word, from the two distributions at that position (same model, same reply so far):
@@ -16,7 +16,17 @@ export type Span = { start: number; end: number; p?: number; alts?: Alt[]; force
  * - `chance`: the model wrote a word other than its own first choice, which is sampling, not values;
  * - `same`: values made no notable difference.
  */
-export type Influence = { kind: "changed" | "boosted" | "chance" | "same"; word: string; withValues: Alt[]; withoutValues: Alt[]; pWith: number; pWithout?: number; rank: number }
+export type Influence = {
+  kind: "changed" | "boosted" | "chance" | "same"
+  word: string
+  withValues: Alt[]
+  withoutValues: Alt[]
+  pWith: number
+  pWithout?: number
+  rank: number
+  /** log2 of how many times likelier the values made the written word: 1 is twice as likely, -1 half as likely. */
+  lift: number
+}
 
 const BOOST = 2
 
@@ -29,11 +39,12 @@ export function influenceOf(piece: Span, text: string): Influence | undefined {
   const pWithout = withoutValues.find((a) => same(a.text, word))?.p
   const topWith = withValues[0]
   const topWithout = withoutValues[0]
-  const base = { word, withValues, withoutValues, pWith: piece.p, pWithout, rank }
+  const floorP = withoutValues.at(-1)?.p ?? 0.01
+  const lift = Math.log2(piece.p / (pWithout ?? Math.min(floorP, piece.p)))
+  const base = { word, withValues, withoutValues, pWith: piece.p, pWithout, rank, lift }
   if (rank > 1) return { kind: "chance", ...base }
   if (!same(topWith.text, topWithout.text)) return { kind: "changed", ...base }
-  const floor = withoutValues.at(-1)?.p ?? 0
-  if (piece.p >= 0.1 && piece.p / (pWithout ?? floor) >= BOOST) return { kind: "boosted", ...base }
+  if (piece.p >= 0.1 && lift >= Math.log2(BOOST)) return { kind: "boosted", ...base }
   return { kind: "same", ...base }
 }
 
@@ -143,7 +154,7 @@ export async function runColumn(col: Column, engine: Engine, source: AsyncIterab
     for await (const piece of source) {
       const start = col.text.length
       col.text += piece.text
-      col.pieces.push({ start, end: col.text.length, p: piece.p, alts: piece.alts })
+      col.pieces.push({ start, end: col.text.length, p: piece.p, alts: piece.alts, plain: piece.plain, amplified: piece.amplified })
       col.sentences = splitSentences(col.text)
       onChange()
       kick()
@@ -246,7 +257,10 @@ export function createColumnView(root: HTMLElement) {
     title.textContent = col.title
     root.classList.toggle("live", col.streaming || col.scoring || col.probing)
     root.classList.toggle("unscored", !scored)
-    const flips = col.pieces.filter((p) => ["changed", "boosted"].includes(influenceOf(p, col.text)?.kind ?? "")).length
+    const flips = col.pieces.filter((p) => {
+      const inf = influenceOf(p, col.text)
+      return !!inf && (inf.kind === "changed" || (inf.kind !== "chance" && inf.lift >= 1))
+    }).length
     state.textContent = col.streaming
       ? "writing"
       : col.scoring
@@ -284,6 +298,7 @@ export function createColumnView(root: HTMLElement) {
       el.dataset.checked = "1"
       el.classList.toggle("flip", inf.kind === "changed")
       el.classList.toggle("boost", inf.kind === "boosted")
+      el.style.setProperty("--lift", Math.max(0, Math.min(4, inf.lift)).toFixed(2))
     })
 
     const cut = reveal === null ? col.text.length : cutAfter(col.text, reveal)
