@@ -1,6 +1,6 @@
 # Value Monitor
 
-Steer a language model between two values and watch, sentence by sentence, which values its reply actually serves, checked against a constitution made in Constitution Lab.
+Pick the values an AI should hold, then watch each sentence of its reply honor or give them up, next to a reply written with no values at all.
 
 Everything runs in the browser. Like the Spaceship IDE, there is no server: the page calls the Gemini API directly with your own key, which stays in your browser's local storage.
 
@@ -28,17 +28,18 @@ Visitors bring their own key. Never put your key in the code: anyone could read 
 
 | Step | What happens | File |
 | --- | --- | --- |
-| Steer | The slider becomes an instruction in the system prompt ("lean clearly toward candor over kindness"). "Follow my constitution" adds your ranked priorities and rules. | `src/engine.ts` |
-| Write | The reply streams in from `streamGenerateContent`. With "Show the unsteered reply too", a plain reply is written alongside and kept for that prompt. | `src/gemini.ts`, `src/panel.ts` |
-| Score | One more call rates every sentence on all eight values from -2 to 2, using a JSON schema so the answer is always structured. | `src/engine.ts` |
-| Check | A sentence breaks a rule when it favors the rule's loser over its winner by 2 or more (3 for rules that only come from the ranking). | `src/analysis.ts` |
-| Show | Value rail, sentence tint, rule-break flags, a tug-of-war bar (constitution target vs. this reply) and an eight-value profile. | `src/panel.ts` |
-| Constitution | Paste Constitution Lab's **Copy Markdown** output in **Constitution**. | `src/constitution.ts` |
+| Choose | Tap up to four values. Their order is their priority. Gentle, Firm or Strict sets how hard the instruction pushes. | `src/main.ts` |
+| Write | Two replies stream side by side: one with no values, one told to hold yours. The no-values reply is kept per question, so changing values only rewrites one side. | `src/engine.ts` |
+| Score | As soon as a couple of sentences are complete, a second call rates them on every value from -2 to 2, so the rail fills in while the reply is still being written. | `src/column.ts` |
+| Highlight | One more call picks the phrases in your question that pull on each value, like the Spaceship IDE's focus view. | `src/engine.ts` |
+| Show | Rail bars per sentence, "gives up" pins, and a summary with the change versus the no-values reply. | `src/column.ts`, `src/style.css` |
 
-Sim and Gemini share one `Engine` type (`write` and `score`), so adding another provider means writing one more engine. Groq, Cerebras and OpenRouter use an OpenAI-style API and also accept requests straight from the browser.
+Settings can import the top four priorities from a Constitution Lab constitution.
+
+Sim and Gemini share one `Engine` type (`write`, `score`, `drivers`), so adding another provider means writing one more engine.
 
 ## Limits
 
-* **Free-tier rate limits.** Each Generate uses two to four requests (one or two replies, each scored). If you see a rate-limit message, wait for the time it gives.
-* **This is behavioral, not internal.** Steering is by instruction and scoring is another model's judgment, so scores can be wrong and steering can be ignored. The Colab notebook (`value_monitor.ipynb`) reads and steers an open-weight model's activations directly.
+* **Free-tier rate limits.** A first run makes about six requests; changing values makes about three. Short rate limits are waited out automatically.
+* **This is behavioral, not internal.** Guidance is by instruction, and scores and highlights are another model call's judgment, not the model's attention or weights. Hosted APIs like Gemini don't expose those. The Colab notebook (`value_monitor.ipynb`) reads and steers an open-weight model's activations directly.
 * **Model names change.** The app asks Google which models your key can use, so it keeps working as new ones ship.
