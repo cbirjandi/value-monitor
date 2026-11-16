@@ -30,7 +30,14 @@ Open **Settings** (the gear) and choose who writes the replies:
 
 * **Sim**: canned replies for the examples. No setup.
 * **Gemini**: Google's model writes and scores. Needs a free API key.
-* **In this browser**: a small open-weight model (Qwen, Llama, Gemma, Phi or Mistral, from 0.5B to 8B parameters) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; each word is classed from the two distributions at that point: colored if the values changed the model's first choice, underlined if they made the word at least twice as likely, and left plain if the model just sampled a lower-ranked word by chance. Clicking a word shows both distributions side by side. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
+* **In this browser**: a small open-weight model runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; each word is classed from the two distributions at that point: colored if the values changed the model's first choice, underlined if they made the word at least twice as likely, and left plain if the model just sampled a lower-ranked word by chance. Clicking a word shows both distributions side by side. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
+
+## Where the models come from
+
+* **In this browser**: WebLLM's prebuilt builds, downloaded from the `mlc-ai` organization on Hugging Face (weights) and the `binary-mlc-llm-libs` GitHub repo (compiled GPU code), then cached by the browser. Two groups are offered:
+  * *Safety-tuned*: the makers' own chat models (Qwen, Llama, Gemma, Phi, Mistral). Their trained-in values often win over the values you pick, which is itself worth showing.
+  * *Steerable*: Nous Research's Hermes models, fine-tuned to follow the system prompt rather than refuse on moral grounds, so the values you pick steer them much further.
+* **Gemini**: Google's API, called directly from the browser with your key.
 
 ## Tune
 

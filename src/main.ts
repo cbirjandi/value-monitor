@@ -5,7 +5,7 @@ import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { addCustomValue, allValues, colorOf, MAX_CHOSEN, nameOf, removeCustomValue, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
-const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-3" }
+const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-4" }
 const RERUN_MS = 650
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
@@ -23,7 +23,7 @@ const loadBar = $("load-bar")
 type Highlight = "values" | "doubt" | "off"
 type Ui = { prompt: string; example: number; chosen: ValueId[]; strength: Strength; compare: boolean; highlight: Highlight; temperature: number; amplify: number }
 const TUNE_DEFAULTS = { highlight: "values" as Highlight, temperature: DEFAULT_TEMPERATURE, amplify: 0 }
-const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: ["candor", "kindness"], strength: "firm", compare: true, ...TUNE_DEFAULTS, ...loadUi() }
+const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: [EXAMPLES[0].a], strength: "firm", compare: true, ...TUNE_DEFAULTS, ...loadUi() }
 
 let progress: Progress | null = null
 let engine: Engine = engineFromStorage()
@@ -62,8 +62,12 @@ promptEdit.addEventListener("keydown", (e) => {
 })
 $("shuffle").addEventListener("click", () => {
   ui.example = (ui.example + 1) % EXAMPLES.length
-  ui.prompt = EXAMPLES[ui.example].prompt
+  const ex = EXAMPLES[ui.example]
+  ui.prompt = ex.prompt
+  // Each example is built around one value pulling against another; start with the first, so its effect shows against no values.
+  ui.chosen = [ex.a]
   saveUi()
+  paintChips()
   renderPrompt()
   run()
 })
@@ -713,7 +717,10 @@ function bindSettings() {
   const modelsStatus = $("models-status")
   let kind: EngineKind = savedKind()
 
-  localSel.innerHTML = LOCAL_MODELS.map((m) => `<option value="${m.id}">${m.name} · ${m.note}</option>`).join("")
+  const option = (m: (typeof LOCAL_MODELS)[number]) => `<option value="${m.id}">${m.name} · ${m.note}</option>`
+  localSel.innerHTML =
+    `<optgroup label="Safety-tuned (the makers' own chat models)">${LOCAL_MODELS.filter((m) => !m.steerable).map(option).join("")}</optgroup>` +
+    `<optgroup label="Steerable (follow the system prompt, rarely refuse)">${LOCAL_MODELS.filter((m) => m.steerable).map(option).join("")}</optgroup>`
   $("webgpu-note").textContent = hasWebGPU()
     ? "Downloads once, then stays cached in this browser. It runs on this computer's graphics chip, and nothing is sent anywhere."
     : "This browser can't run local models (no WebGPU). Use a current Chrome or Edge."

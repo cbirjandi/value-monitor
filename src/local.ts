@@ -1,10 +1,10 @@
 import type { WebWorkerMLCEngine } from "@mlc-ai/web-llm"
 import { DEFAULT_TEMPERATURE, systemPromptOf, type Alt, type Engine, type Piece, type WriteRequest } from "./engine.ts"
 
-type Family = "qwen" | "llama" | "gemma" | "phi" | "mistral"
+type Family = "qwen" | "chatml" | "llama" | "gemma" | "phi" | "mistral"
 
 /** Models WebLLM can run in a browser, smallest first. Sizes are roughly the download and the graphics memory needed. */
-export const LOCAL_MODELS: { id: string; name: string; note: string; family: Family }[] = [
+export const LOCAL_MODELS: { id: string; name: string; note: string; family: Family; steerable?: boolean }[] = [
   { id: "Qwen2.5-0.5B-Instruct-q4f16_1-MLC", name: "Qwen2.5 0.5B", note: "0.4 GB · fastest, weakest", family: "qwen" },
   { id: "Llama-3.2-1B-Instruct-q4f16_1-MLC", name: "Llama 3.2 1B", note: "0.9 GB · Meta", family: "llama" },
   { id: "Qwen2.5-1.5B-Instruct-q4f16_1-MLC", name: "Qwen2.5 1.5B", note: "1 GB", family: "qwen" },
@@ -15,6 +15,11 @@ export const LOCAL_MODELS: { id: string; name: string; note: string; family: Fam
   { id: "Mistral-7B-Instruct-v0.3-q4f16_1-MLC", name: "Mistral 7B", note: "4.6 GB · Mistral AI", family: "mistral" },
   { id: "Qwen2.5-7B-Instruct-q4f16_1-MLC", name: "Qwen2.5 7B", note: "5.1 GB", family: "qwen" },
   { id: "Llama-3.1-8B-Instruct-q4f16_1-MLC", name: "Llama 3.1 8B", note: "5 GB · best writing, needs 16 GB of memory", family: "llama" },
+  // Nous Research's Hermes models are tuned to follow the system prompt rather than refuse on moral grounds,
+  // so the values chosen here steer them much further than they steer the safety-tuned models above.
+  { id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC", name: "Hermes 3 3B", note: "2.3 GB · steerable, few refusals", family: "chatml", steerable: true },
+  { id: "Hermes-2-Pro-Mistral-7B-q4f16_1-MLC", name: "Hermes 2 Pro 7B", note: "4 GB · steerable, few refusals", family: "chatml", steerable: true },
+  { id: "Hermes-3-Llama-3.1-8B-q4f16_1-MLC", name: "Hermes 3 8B", note: "4.9 GB · steerable, few refusals, needs 16 GB", family: "chatml", steerable: true },
 ]
 
 export const hasWebGPU = () => "gpu" in navigator
@@ -63,6 +68,12 @@ const FORMATS: Record<Family, { render: (system: string, turns: Turn[], open: st
     render: (system, turns, open) =>
       `<|im_start|>system\n${system}<|im_end|>\n` + turns.map((t) => `<|im_start|>${t.role}\n${t.text}<|im_end|>\n`).join("") + `<|im_start|>assistant\n${open}`,
     stop: ["<|im_end|>", "<|endoftext|>"],
+  },
+  // Hermes uses the same ChatML layout as Qwen, on Llama and Mistral tokenizers.
+  chatml: {
+    render: (system, turns, open) =>
+      `<|im_start|>system\n${system}<|im_end|>\n` + turns.map((t) => `<|im_start|>${t.role}\n${t.text}<|im_end|>\n`).join("") + `<|im_start|>assistant\n${open}`,
+    stop: ["<|im_end|>", "<|end_of_text|>", "<|eot_id|>", "</s>"],
   },
   llama: {
     render: (system, turns, open) =>
