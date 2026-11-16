@@ -1,174 +1,233 @@
-import { allConflicts, oriented, parseConstitution, SAMPLE_CONSTITUTION, V, type ValueId } from "./constitution.ts"
-import { DILEMMAS, geminiEngine, simEngine, steerWords, type Engine, type Steer } from "./engine.ts"
+import { createColumnView, newColumn, runColumn, type Column } from "./column.ts"
+import { EXAMPLES, geminiEngine, simEngine, type Driver, type Engine } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
-import { emptyPanel, fillPanel, renderPanel, type PanelState } from "./panel.ts"
+import { colorOf, MAX_CHOSEN, topValuesFromLab, V, VALUES, type Strength, type ValueId } from "./values.ts"
 
-const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", constitution: "vm-constitution", ui: "vm-ui" }
+const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", ui: "vm-ui-2" }
+const RERUN_MS = 650
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
-const exampleSel = $<HTMLSelectElement>("example")
-const promptBox = $<HTMLTextAreaElement>("prompt")
-const conflictSel = $<HTMLSelectElement>("conflict")
-const steerInput = $<HTMLInputElement>("steer")
-const follow = $<HTMLInputElement>("follow")
+const promptView = $("prompt-view")
+const promptEdit = $<HTMLTextAreaElement>("prompt")
+const chipsEl = $("chips")
+const strengthEl = $("strength")
 const compare = $<HTMLInputElement>("compare")
-const auto = $<HTMLInputElement>("auto")
+const output = $("output")
 const statusEl = $("status")
-const panelsEl = $("panels")
-const badge = $<HTMLButtonElement>("engine-badge")
+const focusNote = $("focus-note")
 
-let constitutionMd = read(STORE.constitution) || SAMPLE_CONSTITUTION
-let constitution = parseConstitution(constitutionMd)
+type Ui = { prompt: string; example: number; chosen: ValueId[]; strength: Strength; compare: boolean }
+const ui: Ui = { prompt: EXAMPLES[0].prompt, example: 0, chosen: ["candor", "kindness"], strength: "firm", compare: true, ...loadUi() }
+
 let engine: Engine = engineFromStorage()
-let panels: PanelState[] = []
 let controller: AbortController | undefined
-/** The unsteered reply is the same for every slider position, so it is kept per prompt and model. */
-const baselines = new Map<string, PanelState>()
+let rerunTimer: number | undefined
+let columns: { col: Column; update: ReturnType<typeof createColumnView> }[] = []
+/** The plain reply doesn't depend on the chosen values, so it is kept per model and prompt. */
+const plainCache = new Map<string, Column>()
+const driverCache = new Map<string, Driver[]>()
 
-setupExamples()
-setupConflicts()
-restoreUi()
-updateSteerLabels()
-updateBadge()
-renderAll()
+renderChips()
+renderStrength()
+renderPrompt()
+compare.checked = ui.compare
+renderEmpty()
+updateModel()
 bindSettings()
-bindConstitution()
 document.body.dataset.ready = "1"
 
-exampleSel.addEventListener("change", () => {
-  const d = DILEMMAS[Number(exampleSel.value)]
-  if (!d) return
-  promptBox.value = d.prompt
-  setConflict(oriented(constitution, d.a, d.b))
-  saveUi()
-})
-conflictSel.addEventListener("change", () => (updateSteerLabels(), renderAll(), saveUi()))
-steerInput.addEventListener("input", updateSteerLabels)
-steerInput.addEventListener("change", () => {
-  saveUi()
-  if (auto.checked) generate()
-})
-for (const el of [follow, compare, auto, promptBox]) el.addEventListener("change", saveUi)
-$("generate").addEventListener("click", generate)
-$("score-pasted").addEventListener("click", scorePasted)
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+promptView.addEventListener("click", startEditing)
+promptView.addEventListener("keydown", (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), startEditing()))
+promptEdit.addEventListener("input", autosize)
+promptEdit.addEventListener("blur", stopEditing)
+promptEdit.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault()
-    generate()
+    stopEditing()
+    run()
   }
+  if (e.key === "Escape") stopEditing()
+})
+$("shuffle").addEventListener("click", () => {
+  ui.example = (ui.example + 1) % EXAMPLES.length
+  const ex = EXAMPLES[ui.example]
+  ui.prompt = ex.prompt
+  saveUi()
+  renderPrompt()
+  run()
+})
+$("run").addEventListener("click", run)
+compare.addEventListener("change", () => ((ui.compare = compare.checked), saveUi(), scheduleRerun()))
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) (e.preventDefault(), run())
 })
 
-function currentPair(): [ValueId, ValueId] {
-  return conflictSel.value.split("|") as [ValueId, ValueId]
-}
-
-function currentSteer(): Steer | null {
-  const [x, y] = currentPair()
-  const t = Number(steerInput.value) / 100
-  return Math.abs(t) < 0.15 ? null : { x, y, t }
-}
-
-function generate() {
-  const prompt = promptBox.value.trim()
-  if (!prompt) return setStatus("Write a prompt first.", true)
+function run() {
+  window.clearTimeout(rerunTimer)
+  const prompt = ui.prompt.trim()
+  if (!prompt) return setStatus("Write a question first.")
   controller?.abort()
   controller = new AbortController()
   const { signal } = controller
-  const steer = currentSteer()
-  const constitutionUsed = follow.checked ? constitution : null
-  const changed = !!steer || !!constitutionUsed
-  const main = emptyPanel(titleOf(steer, !!constitutionUsed), prompt)
-  panels = [main]
-  const jobs = [fillPanel(main, engine, engine.write({ prompt, steer, constitution: constitutionUsed }, signal), signal, renderAll)]
-
-  if (compare.checked && changed) {
-    const id = `${engine.label}\n${prompt}`
-    const cached = baselines.get(id)
-    if (cached && !cached.error) panels = [cached, main]
-    else {
-      const base = emptyPanel("Unsteered", prompt)
-      panels = [base, main]
-      jobs.push(fillPanel(base, engine, engine.write({ prompt, steer: null, constitution: null }, signal), signal, renderAll).then(() => void (!base.error && baselines.set(id, base))))
-    }
-  }
   setStatus("")
-  renderAll()
-  Promise.all(jobs).then(() => {
-    if (!signal.aborted && !panels.some((p) => p.error)) setStatus(`Done with ${engine.label}.`)
-  })
-}
 
-function scorePasted() {
-  const text = $<HTMLTextAreaElement>("pasted").value.trim()
-  const prompt = promptBox.value.trim()
-  if (!text) return setStatus("Paste a reply first.", true)
-  controller?.abort()
-  controller = new AbortController()
-  const panel = emptyPanel("Pasted reply", prompt || "(no prompt)")
-  panels = [panel]
-  fillPanel(panel, engine, text, controller.signal, renderAll)
-}
-
-function titleOf(steer: Steer | null, followed: boolean) {
-  const s = steerWords(steer)
-  const parts = [s ? `Steered ${s.level} toward ${V[s.to].name}` : "", followed ? "following constitution" : ""].filter(Boolean)
-  return parts.length ? parts.join(", ") : "Unsteered"
-}
-
-function renderAll() {
-  const [x, y] = currentPair()
-  if (!panels.length) {
-    panelsEl.innerHTML = `<article class="panel"><header class="phead"><h2>Ready</h2></header><p class="waiting">Pick an example or write a prompt, drag the slider toward a value, and press Generate. ${
-      engine === simEngine ? "You're in sim mode: replies are canned. Add a free Gemini key in Settings for real ones." : ""
-    }</p></article>`
-    return
-  }
-  while (panelsEl.children.length > panels.length) panelsEl.lastElementChild!.remove()
-  panels.forEach((p, i) => {
-    let el = panelsEl.children[i] as HTMLElement | undefined
-    if (!el || el.tagName !== "ARTICLE" || el.dataset.live !== "1") {
-      el = document.createElement("article")
-      el.className = "panel"
-      el.dataset.live = "1"
-      if (panelsEl.children[i]) panelsEl.children[i].replaceWith(el)
-      else panelsEl.append(el)
+  const plainId = `${engine.label}\n${prompt}`
+  const wanted: { col: Column; job?: Promise<void> }[] = []
+  if (ui.compare || !ui.chosen.length) {
+    const cached = plainCache.get(plainId)
+    if (cached && !cached.error) wanted.push({ col: cached })
+    else {
+      const col = newColumn("No values", prompt)
+      wanted.push({ col, job: runColumn(col, engine, engine.write({ prompt, values: [], strength: ui.strength }, signal), signal, paint).then(() => void (!col.error && !signal.aborted && plainCache.set(plainId, col))) })
     }
-    renderPanel(el, p, { x, y, constitution })
+  }
+  if (ui.chosen.length) {
+    const col = newColumn(`With ${listOf(ui.chosen.map((id) => V[id].name.toLowerCase()))}`, prompt)
+    wanted.push({ col, job: runColumn(col, engine, engine.write({ prompt, values: ui.chosen, strength: ui.strength }, signal), signal, paint) })
+  }
+
+  output.replaceChildren()
+  output.classList.toggle("two", wanted.length === 2)
+  columns = wanted.map(({ col }) => {
+    const el = document.createElement("article")
+    el.className = "col"
+    output.append(el)
+    return { col, update: createColumnView(el) }
   })
-  const failed = panels.find((p) => p.error)
-  if (failed) setStatus(failed.error!, true)
+  paint()
+  loadDrivers(prompt, signal)
+  Promise.all(wanted.map((w) => w.job)).then(() => {
+    if (signal.aborted) return
+    const failed = columns.find((c) => c.col.error)
+    setStatus(failed ? failed.col.error! : "")
+  })
 }
 
-function updateSteerLabels() {
-  const [x, y] = currentPair()
-  $("end-x").textContent = `← ${V[x].name}`
-  $("end-y").textContent = `${V[y].name} →`
-  const s = steerWords(currentSteer())
-  $("steer-readout").textContent = s ? `Lean ${s.level} toward ${V[s.to].name.toLowerCase()}` : "No steering: the model's default balance"
+function paint() {
+  const plain = columns.find((c) => c.col.title === "No values")?.col
+  for (const { col, update } of columns) update(col, ui.chosen, col === plain ? undefined : plain)
 }
 
-function setupExamples() {
-  exampleSel.innerHTML = `<option value="">(write your own)</option>` + DILEMMAS.map((d, i) => `<option value="${i}">${d.title}</option>`).join("")
+function scheduleRerun() {
+  if (!columns.length) return
+  window.clearTimeout(rerunTimer)
+  rerunTimer = window.setTimeout(run, RERUN_MS)
 }
 
-function setupConflicts() {
-  const keep = conflictSel.value
-  conflictSel.innerHTML = allConflicts(constitution)
-    .map(([x, y]) => `<option value="${x}|${y}">${V[x].name} vs ${V[y].name}</option>`)
-    .join("")
-  if (keep) setConflict(keep.split("|") as [ValueId, ValueId])
+async function loadDrivers(prompt: string, signal: AbortSignal) {
+  const id = `${engine.label}\n${prompt}`
+  if (!driverCache.has(id)) {
+    try {
+      driverCache.set(id, await engine.drivers(prompt, signal))
+    } catch {
+      return
+    }
+  }
+  if (!signal.aborted) renderPrompt()
 }
 
-function setConflict([x, y]: [ValueId, ValueId]) {
-  const options = [...conflictSel.options].map((o) => o.value)
-  conflictSel.value = options.includes(`${x}|${y}`) ? `${x}|${y}` : options.includes(`${y}|${x}`) ? `${y}|${x}` : options[0]
-  updateSteerLabels()
-  renderAll()
+function renderChips() {
+  chipsEl.innerHTML = VALUES.map((v) => `<button type="button" class="chip" data-id="${v.id}" title="${esc(v.principle)}"><i></i>${v.name}</button>`).join("")
+  chipsEl.querySelectorAll<HTMLButtonElement>(".chip").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.id as ValueId
+      if (ui.chosen.includes(id)) ui.chosen = ui.chosen.filter((x) => x !== id)
+      else if (ui.chosen.length < MAX_CHOSEN) ui.chosen = [...ui.chosen, id]
+      else return pulse(b)
+      saveUi()
+      paintChips()
+      renderPrompt()
+      paint()
+      scheduleRerun()
+    }),
+  )
+  paintChips()
 }
 
-function setStatus(text: string, isError = false) {
+function paintChips() {
+  chipsEl.querySelectorAll<HTMLButtonElement>(".chip").forEach((b) => {
+    const id = b.dataset.id as ValueId
+    const on = ui.chosen.includes(id)
+    b.setAttribute("aria-pressed", String(on))
+    b.style.setProperty("--c", on ? colorOf(ui.chosen, id) : "transparent")
+    b.classList.toggle("full", !on && ui.chosen.length >= MAX_CHOSEN)
+  })
+}
+
+function pulse(el: HTMLElement) {
+  el.classList.remove("nope")
+  void el.offsetWidth
+  el.classList.add("nope")
+  setStatus(`Pick up to ${MAX_CHOSEN} values. Tap one to remove it.`)
+}
+
+function renderStrength() {
+  strengthEl.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+    b.setAttribute("aria-checked", String(b.dataset.v === ui.strength))
+    b.onclick = () => {
+      ui.strength = b.dataset.v as Strength
+      saveUi()
+      renderStrength()
+      scheduleRerun()
+    }
+  })
+}
+
+function renderPrompt() {
+  const text = ui.prompt
+  const drivers = (driverCache.get(`${engine.label}\n${text}`) ?? []).filter((d) => ui.chosen.includes(d.value))
+  const marks: { start: number; end: number; value: ValueId }[] = []
+  for (const d of drivers) {
+    const start = text.toLowerCase().indexOf(d.phrase.toLowerCase())
+    const end = start + d.phrase.length
+    if (start >= 0 && !marks.some((m) => start < m.end && end > m.start)) marks.push({ start, end, value: d.value })
+  }
+  marks.sort((a, b) => a.start - b.start)
+  let html = ""
+  let at = 0
+  for (const m of marks) {
+    html += esc(text.slice(at, m.start)) + `<mark style="--c:${colorOf(ui.chosen, m.value)}" title="Pulls on ${V[m.value].name.toLowerCase()}">${esc(text.slice(m.start, m.end))}</mark>`
+    at = m.end
+  }
+  html += esc(text.slice(at))
+  promptView.innerHTML = html || `<span class="placeholder">Ask something…</span>`
+  focusNote.textContent = marks.length ? "Highlighted: phrases the scorer says pull on your values" : ""
+}
+
+function startEditing() {
+  promptEdit.value = ui.prompt
+  promptView.hidden = true
+  promptEdit.hidden = false
+  autosize()
+  promptEdit.focus()
+  promptEdit.setSelectionRange(promptEdit.value.length, promptEdit.value.length)
+}
+
+function stopEditing() {
+  if (promptEdit.hidden) return
+  ui.prompt = promptEdit.value.trim()
+  saveUi()
+  promptEdit.hidden = true
+  promptView.hidden = false
+  renderPrompt()
+}
+
+function autosize() {
+  promptEdit.style.height = "auto"
+  promptEdit.style.height = `${promptEdit.scrollHeight}px`
+}
+
+function renderEmpty() {
+  output.classList.remove("two")
+  output.innerHTML = `<div class="empty-state"><p>Pick the values the assistant should hold, then press <b>Run</b>.</p><p class="sub">Each sentence of the reply is checked against them as it's written.</p></div>`
+}
+
+function setStatus(text: string) {
   statusEl.textContent = text
-  statusEl.classList.toggle("err", isError)
+}
+
+function listOf(items: string[]) {
+  return items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`
 }
 
 function engineFromStorage(): Engine {
@@ -177,9 +236,9 @@ function engineFromStorage(): Engine {
   return key && model ? geminiEngine(key, model) : simEngine
 }
 
-function updateBadge() {
-  badge.textContent = engine.label
-  badge.classList.toggle("sim", engine === simEngine)
+function updateModel() {
+  $("model-label").textContent = engine.isSim ? "Sim mode · add a key" : engine.label
+  $("model-btn").classList.toggle("sim", engine.isSim)
 }
 
 function bindSettings() {
@@ -190,82 +249,58 @@ function bindSettings() {
   const open = () => {
     keyInput.value = read(STORE.key)
     const saved = read(STORE.model)
-    modelSel.innerHTML = saved ? `<option>${saved}</option>` : `<option value="">Load your models first</option>`
+    modelSel.innerHTML = saved ? `<option>${esc(saved)}</option>` : `<option value="">Paste a key, then Find my models</option>`
     modelsStatus.textContent = ""
     dialog.showModal()
   }
-  $("open-settings").addEventListener("click", open)
-  badge.addEventListener("click", open)
-  $("load-models").addEventListener("click", async () => {
+  const findModels = async () => {
     const key = keyInput.value.trim()
     if (!key) return void (modelsStatus.textContent = "Paste a key first.")
-    modelsStatus.textContent = "Loading…"
+    modelsStatus.textContent = "Looking…"
     try {
       const models = await listModels(key)
       if (!models.length) throw new Error("No text models are available for this key.")
       const pick = models.includes(read(STORE.model)) ? read(STORE.model) : defaultModel(models)
-      modelSel.innerHTML = models.map((m) => `<option ${m === pick ? "selected" : ""}>${m}</option>`).join("")
-      modelsStatus.textContent = `${models.length} models. ${pick} is the fastest pick.`
+      modelSel.innerHTML = models.map((m) => `<option ${m === pick ? "selected" : ""}>${esc(m)}</option>`).join("")
+      modelsStatus.textContent = `Selected ${pick}, the fastest one available.`
     } catch (e) {
       modelsStatus.textContent = e instanceof Error ? e.message : String(e)
     }
+  }
+  $("settings-btn").addEventListener("click", open)
+  $("model-btn").addEventListener("click", open)
+  $("load-models").addEventListener("click", findModels)
+  keyInput.addEventListener("change", () => keyInput.value.trim() && !modelSel.value && findModels())
+  $("lab-import").addEventListener("click", () => {
+    const top = topValuesFromLab($<HTMLTextAreaElement>("lab-md").value)
+    $("lab-status").textContent = top.length ? `Using ${listOf(top.map((id) => V[id].name))}.` : "No priorities found. Paste the whole Markdown."
+    if (!top.length) return
+    ui.chosen = top
+    saveUi()
+    paintChips()
+    renderPrompt()
   })
   dialog.addEventListener("close", () => {
     if (dialog.returnValue !== "save") return
-    const key = keyInput.value.trim()
-    write(STORE.key, key)
+    write(STORE.key, keyInput.value.trim())
     if (modelSel.value) write(STORE.model, modelSel.value)
-    if (key && !modelSel.value) setStatus("Press Load my models and pick a model, then save again.", true)
     engine = engineFromStorage()
-    baselines.clear()
-    updateBadge()
-    renderAll()
+    updateModel()
+    if (keyInput.value.trim() && !modelSel.value) setStatus("Press Find my models and save again to switch from sim mode.")
+    renderPrompt()
   })
 }
 
-function bindConstitution() {
-  const dialog = $<HTMLDialogElement>("constitution-dialog")
-  const box = $<HTMLTextAreaElement>("constitution-md")
-  const summary = $("constitution-summary")
-  const describe = () => {
-    const c = parseConstitution(box.value)
-    summary.textContent = c.order.length ? `Read ${c.order.length} priorities (${c.order.map((id) => V[id].name).join(" > ")}) and ${c.rules.size} rules.` : "No priorities found yet. Paste Constitution Lab's Markdown."
+function loadUi(): Partial<Ui> {
+  try {
+    return JSON.parse(read(STORE.ui) || "{}")
+  } catch {
+    return {}
   }
-  $("open-constitution").addEventListener("click", () => {
-    box.value = constitutionMd
-    describe()
-    dialog.showModal()
-  })
-  box.addEventListener("input", describe)
-  $("reset-constitution").addEventListener("click", () => ((box.value = SAMPLE_CONSTITUTION), describe()))
-  dialog.addEventListener("close", () => {
-    if (dialog.returnValue !== "save") return
-    constitutionMd = box.value
-    constitution = parseConstitution(constitutionMd)
-    write(STORE.constitution, constitutionMd)
-    setupConflicts()
-    renderAll()
-  })
 }
 
 function saveUi() {
-  write(STORE.ui, JSON.stringify({ prompt: promptBox.value, conflict: conflictSel.value, steer: steerInput.value, follow: follow.checked, compare: compare.checked, auto: auto.checked, example: exampleSel.value }))
-}
-
-function restoreUi() {
-  let ui: Record<string, unknown> = {}
-  try {
-    ui = JSON.parse(read(STORE.ui) || "{}")
-  } catch {}
-  exampleSel.value = typeof ui.example === "string" ? ui.example : "0"
-  const d = DILEMMAS[Number(exampleSel.value)]
-  promptBox.value = typeof ui.prompt === "string" && ui.prompt ? ui.prompt : (d?.prompt ?? DILEMMAS[0].prompt)
-  if (typeof ui.conflict === "string") setConflict(ui.conflict.split("|") as [ValueId, ValueId])
-  else setConflict(oriented(constitution, d?.a ?? "candor", d?.b ?? "kindness"))
-  if (typeof ui.steer === "string") steerInput.value = ui.steer
-  if (typeof ui.follow === "boolean") follow.checked = ui.follow
-  if (typeof ui.compare === "boolean") compare.checked = ui.compare
-  if (typeof ui.auto === "boolean") auto.checked = ui.auto
+  write(STORE.ui, JSON.stringify(ui))
 }
 
 function read(key: string) {
@@ -280,4 +315,8 @@ function write(key: string, value: string) {
   try {
     localStorage.setItem(key, value)
   } catch {}
+}
+
+function esc(t: string) {
+  return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
 }
