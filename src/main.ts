@@ -1,5 +1,5 @@
-import { createColumnView, newColumn, runColumn, type Column } from "./column.ts"
-import { EXAMPLES, geminiEngine, simEngine, type Alt, type Driver, type Engine } from "./engine.ts"
+import { createColumnView, isFlip, newColumn, probeColumn, runColumn, type Column } from "./column.ts"
+import { EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { colorOf, MAX_CHOSEN, topValuesFromLab, V, VALUES, type Strength, type ValueId } from "./values.ts"
@@ -96,13 +96,13 @@ function run() {
     else {
       const col = newColumn("plain", "No values", { prompt, values: [], strength: ui.strength })
       cols.push(col)
-      jobs.push(runColumn(col, engine, engine.write(col.request, signal), signal, paint).then(() => void (!col.error && !signal.aborted && plainCache.set(plainId, col))))
+      jobs.push(runColumn(col, engine, tidy(engine.write(col.request, signal)), signal, paint).then(() => void (!col.error && !signal.aborted && plainCache.set(plainId, col))))
     }
   }
   if (ui.chosen.length) {
     const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => V[id].name.toLowerCase()))}`, { prompt, values: ui.chosen, strength: ui.strength })
     cols.push(col)
-    jobs.push(runColumn(col, engine, engine.write(col.request, signal), signal, paint))
+    jobs.push(runColumn(col, engine, tidy(engine.write(col.request, signal)), signal, paint))
   }
 
   output.replaceChildren()
@@ -110,7 +110,12 @@ function run() {
   slots = cols.map((col) => mountSlot(col))
   paint()
   loadDrivers(prompt, signal)
-  settle(jobs, signal)
+  settle(jobs, signal).then(() => compareWords(signal))
+}
+
+/** Once the replies are written, check which words of the guided reply the values changed (in-browser model only). */
+async function compareWords(signal: AbortSignal) {
+  for (const { col } of slots) if (!signal.aborted && !col.error) await probeColumn(col, engine, signal, paint)
 }
 
 function mountSlot(col: Column, replace?: HTMLElement): Slot {
@@ -122,7 +127,7 @@ function mountSlot(col: Column, replace?: HTMLElement): Slot {
 }
 
 function settle(jobs: Promise<void>[], signal: AbortSignal) {
-  Promise.all(jobs).then(() => {
+  return Promise.all(jobs).then(() => {
     if (signal.aborted) return
     const failed = slots.find((s) => s.col.error)
     setStatus(failed ? failed.col.error! : "")
@@ -169,10 +174,19 @@ function onTokenClick(e: MouseEvent) {
   const alts: Alt[] = [...(piece.alts ?? [])]
   if (!alts.some((a) => a.text === chosenText)) alts.push({ text: chosenText, p: piece.p })
   alts.sort((a, b) => b.p - a.p)
-  const busy = slots.some((s) => s.col.streaming || s.col.scoring)
+  const busy = slots.some((s) => s.col.streaming || s.col.scoring || s.col.probing)
   const canBranch = engine.canBranch && !busy
+  const flip = isFlip(piece, slot.col.text)
+  const plainLine = piece.plain
+    ? `<p class="pop-plain${flip ? " flip" : ""}">${
+        flip
+          ? `Your values changed this word. With no values, the model's first choice was <b>${shown(piece.plain.top.text)}</b> ${pct(piece.plain.top.p)}, and this word was ${piece.plain.p === undefined ? "not in its top five" : pct(piece.plain.p)}.`
+          : `With no values the model would also pick this word${piece.plain.p !== undefined ? ` (${pct(piece.plain.p)})` : ""}.`
+      }</p>`
+    : ""
   popover.innerHTML = `
-    <p class="pop-head">${piece.forced ? "You picked" : "The model chose"} <b>${shown(chosenText)}</b> <span>${pct(piece.p)}</span></p>
+    <p class="pop-head">${piece.forced ? "You picked" : slot.col.kind === "guided" ? "With your values, the model chose" : "The model chose"} <b>${shown(chosenText)}</b> <span>${pct(piece.p)}</span></p>
+    ${plainLine}
     <ol class="pop-list">${alts
       .map(
         (a, i) => `<li class="${a.text === chosenText ? "picked" : ""}">
@@ -223,7 +237,7 @@ function branch(slot: Slot, k: number, alt: Alt) {
   const next = mountSlot(col, slot.el)
   slots = slots.map((s) => (s === slot ? next : s))
   paint()
-  settle([runColumn(col, engine, engine.write(col.request, signal, col.text), signal, paint)], signal)
+  settle([runColumn(col, engine, tidy(engine.write(col.request, signal, col.text), col.text), signal, paint)], signal).then(() => compareWords(signal))
 }
 
 const pct = (p: number) => `${p >= 0.995 ? ">99" : p < 0.01 ? "<1" : Math.round(p * 100)}%`

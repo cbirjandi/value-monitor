@@ -3,8 +3,15 @@ import { colorOf, V, type Scores, type ValueId } from "./values.ts"
 
 /** Where a sentence sits in the column's text. */
 export type Sentence = { text: string; start: number; end: number }
-/** Where a streamed piece sits in the column's text; `forced` marks a word the user picked to rewrite from. */
-export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean }
+/**
+ * Where a streamed piece sits in the column's text; `forced` marks a word the user picked to rewrite from.
+ * `plain` is what the same model, with no values, thought most likely at this point, and how likely it found this piece.
+ */
+export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; plain?: { top: Alt; p?: number } }
+
+/** The values changed this word: with no values, the model's first choice here would have been a different word. */
+export const isFlip = (piece: Span, text: string) => !!piece.plain && norm(piece.plain.top.text) !== norm(text.slice(piece.start, piece.end))
+const norm = (t: string) => t.trim().toLowerCase()
 
 export type Column = {
   kind: "plain" | "guided"
@@ -16,11 +23,13 @@ export type Column = {
   scores: (Scores | undefined)[]
   streaming: boolean
   scoring: boolean
+  /** Checking each word against the no-values model. */
+  probing: boolean
   error?: string
 }
 
 export function newColumn(kind: Column["kind"], title: string, request: WriteRequest): Column {
-  return { kind, title, request, text: "", pieces: [], sentences: [], scores: [], streaming: true, scoring: false }
+  return { kind, title, request, text: "", pieces: [], sentences: [], scores: [], streaming: true, scoring: false, probing: false }
 }
 
 export function splitSentences(text: string): Sentence[] {
@@ -92,6 +101,35 @@ export async function runColumn(col: Column, engine: Engine, source: AsyncIterab
   }
 }
 
+/**
+ * Asks the model, given the reply so far but no values, what it would most likely say at each word, left to right,
+ * so words the values changed light up as the check sweeps along.
+ */
+export async function probeColumn(col: Column, engine: Engine, signal: AbortSignal, onChange: () => void) {
+  if (!engine.probe || col.kind !== "guided") return
+  const plain = { ...col.request, values: [] }
+  col.probing = true
+  onChange()
+  try {
+    for (const piece of col.pieces) {
+      if (signal.aborted) return
+      if (piece.p === undefined || piece.plain || !col.text.slice(piece.start, piece.end).trim()) continue
+      const alts = await engine.probe(plain, col.text.slice(0, piece.start), signal)
+      if (!alts.length) continue
+      const chosen = norm(col.text.slice(piece.start, piece.end))
+      piece.plain = { top: alts[0], p: alts.find((a) => norm(a.text) === chosen)?.p }
+      onChange()
+    }
+  } catch (e) {
+    if (!signal.aborted) col.error = messageOf(e)
+  } finally {
+    if (!signal.aborted) {
+      col.probing = false
+      onChange()
+    }
+  }
+}
+
 /** Renders a column into `root`, appending new text instead of redrawing it, so streamed words fade in. Pieces with probabilities become clickable tokens. */
 export function createColumnView(root: HTMLElement) {
   root.innerHTML = `
@@ -108,9 +146,18 @@ export function createColumnView(root: HTMLElement) {
 
   return function update(col: Column, chosen: ValueId[], scored: boolean, baseline?: Column) {
     title.textContent = col.title
-    root.classList.toggle("live", col.streaming || col.scoring)
+    root.classList.toggle("live", col.streaming || col.scoring || col.probing)
     root.classList.toggle("unscored", !scored)
-    state.textContent = col.streaming ? "writing" : col.scoring ? "scoring" : col.error ? "" : `${col.sentences.length} sentences`
+    const flips = col.pieces.filter((p) => isFlip(p, col.text)).length
+    state.textContent = col.streaming
+      ? "writing"
+      : col.scoring
+        ? "scoring"
+        : col.probing
+          ? `comparing with no values · ${flips} changed`
+          : col.error
+            ? ""
+            : `${col.sentences.length} sentences${col.kind === "guided" && col.pieces.some((p) => p.plain) ? ` · ${flips} word${flips === 1 ? "" : "s"} changed by your values` : ""}`
     error.hidden = !col.error
     error.textContent = col.error ?? ""
 
@@ -132,6 +179,12 @@ export function createColumnView(root: HTMLElement) {
       paintRow(rowEls[i].el, col.scores[i], chosen, col.scoring && !col.scores[i])
     })
     if (!col.sentences.length && col.streaming && !rows.children.length) rows.innerHTML = `<p class="waiting">Waiting for the model</p>`
+    rows.querySelectorAll<HTMLElement>(".tok:not([data-checked])").forEach((el) => {
+      const piece = col.pieces[Number(el.dataset.k)]
+      if (!piece?.plain) return
+      el.dataset.checked = "1"
+      if (isFlip(piece, col.text)) el.classList.add("flip")
+    })
 
     paintSummary(sum, col, chosen, scored, baseline)
   }

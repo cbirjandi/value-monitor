@@ -17,6 +17,8 @@ export type Engine = {
   /** Can continue a reply from a given beginning, which is what rewriting from a chosen word needs. */
   canBranch: boolean
   write(req: WriteRequest, signal: AbortSignal, prefix?: string): AsyncIterable<Piece>
+  /** The model's most likely next tokens after `prefix`, most likely first. Only models that expose probabilities have it. */
+  probe?(req: WriteRequest, prefix: string, signal: AbortSignal): Promise<Alt[]>
   /** Scores the sentences at `indices` on every value, from -2 (gives it up) to 2 (upholds it), reading the others for context. */
   score?(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
@@ -30,8 +32,11 @@ const HOW: Record<Strength, string> = {
   strict: "Put them above everything else, even when that makes the reply less pleasant or less complete.",
 }
 
+/** Replies stop after this many sentences, so they stay short whatever the model does. */
+export const MAX_SENTENCES = 3
+
 export function systemPromptOf(req: WriteRequest) {
-  const base = "You are a helpful AI assistant. Reply in plain prose: no headings, lists or markdown, under 110 words."
+  const base = "You are a helpful AI assistant. Answer in two or three short sentences of plain prose, under 60 words. Never use lists, numbering, headings or markdown."
   if (!req.values.length) return base
   const list = req.values.map((id, i) => `${i + 1}. ${V[id].name}: ${V[id].principle}`).join("\n")
   return `${base}\n\nYour guiding values for this reply, most important first:\n${list}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.`
@@ -173,4 +178,47 @@ export function sleep(ms: number, signal: AbortSignal) {
     const t = setTimeout(resolve, ms)
     signal.addEventListener("abort", () => (clearTimeout(t), reject(new DOMException("aborted", "AbortError"))), { once: true })
   })
+}
+
+/**
+ * Cleans a reply as it streams: drops list markers and markdown, turns line breaks into spaces,
+ * and ends the reply after `MAX_SENTENCES` sentences. `before` is any text the reply continues from.
+ */
+export async function* tidy(source: AsyncIterable<Piece>, before = ""): AsyncIterable<Piece> {
+  let text = before
+  let lineStart = !before
+  let held = ""
+  let needSpace = false
+  for await (const piece of source) {
+    const parts = piece.text.replace(/\*\*|__|`|#{1,6} /g, "").split(/\n+/)
+    let out = ""
+    parts.forEach((part, i) => {
+      if (i > 0) {
+        lineStart = true
+        held = ""
+        needSpace = true
+      }
+      if (!lineStart) return void (out += part)
+      held += part
+      if (MARKER_ONLY.test(held)) return
+      lineStart = false
+      let content = held.replace(MARKER, "").replace(/^\s+/, "")
+      const soFar = text + out
+      if (soFar && !/\s$/.test(soFar) && (needSpace || /^\s/.test(held))) content = ` ${content}`
+      needSpace = false
+      out += content
+    })
+    if (!text) out = out.trimStart()
+    if (!out) continue
+    text += out
+    yield { ...piece, text: out }
+    if (/[.!?]["”’')\]]*$/.test(text.trimEnd()) && sentenceCount(text) >= MAX_SENTENCES) return
+  }
+}
+
+const MARKER_ONLY = /^\s*(\d{1,2}[.)]?|[-*•])?\s*$/
+const MARKER = /^\s*(\d{1,2}[.)]|[-*•])\s*/
+
+function sentenceCount(text: string) {
+  return (text.match(/[^.!?]+[.!?]+/g) ?? []).filter((s) => /[A-Za-z]/.test(s)).length
 }

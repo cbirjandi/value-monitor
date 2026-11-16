@@ -9,6 +9,7 @@
   --live: #e5532d;
   --neg: #d23b2a;
   --good: #1f8a5b;
+  --flip: #6a45d9;
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --ease: cubic-bezier(.2, .7, .2, 1);
@@ -17,7 +18,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0e0f10; --surface: #151618; --ink: #f2f2f0; --soft-ink: #c9cbcd; --muted: #7d8287;
-    --line: #26282b; --hair: #1d1f21; --neg: #ff6a57; --good: #4fc28b;
+    --line: #26282b; --hair: #1d1f21; --neg: #ff6a57; --good: #4fc28b; --flip: #a98bff;
     color-scheme: dark;
   }
 }
@@ -209,3 +210,13 @@ details textarea { font: 12px/1.4 var(--mono); margin-bottom: 8px; }
 .col.unscored .row { grid-template-columns: minmax(0, 1fr); }
 .col.unscored .rail { display: none; }
 .col.unscored .pins { grid-column: 1; }
+
+/* Words the values changed: the no-values model's first choice was different */
+.tok.flip { color: var(--flip); font-weight: 500; box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--flip) 55%, transparent); animation: flip-in .6s var(--ease); }
+@keyframes flip-in { from { color: inherit; box-shadow: inset 0 -2px 0 transparent; } }
+.tok.flip:hover { box-shadow: inset 0 -2px 0 var(--flip); }
+.pop-plain { margin: -2px 4px 10px; font: 400 12px/1.45 var(--sans); color: var(--muted); }
+.pop-plain.flip { color: var(--flip); }
+.pop-plain b { font-weight: 600; }
+.key-shade { background: color-mix(in srgb, var(--live) 30%, transparent); border-radius: 3px; padding: 0 3px; color: var(--ink); }
+.key-flip { color: var(--flip); font-weight: 500; box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--flip) 55%, transparent); }
