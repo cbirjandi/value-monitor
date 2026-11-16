@@ -96,8 +96,14 @@ const norm = (t: string) => t.trim().toLowerCase()
 const same = (a: string, b: string) => a === b || norm(a) === norm(b)
 
 /** Streams `source` into the column, after any text already in it. `w` records the steering blend the new text is written with. */
+/** The other side's top five at a token, plus the token itself (its probability is exact) when it isn't among them. */
+function withWord(d: { p: number; top: Alt[] }, word: string): Alt[] {
+  return d.top.some((a) => same(a.text, word)) ? d.top : [...d.top, { text: word, p: d.p }]
+}
+
 export async function runColumn(col: Column, source: AsyncIterable<Piece>, signal: AbortSignal, onChange: () => void, w?: number) {
   const startLength = col.text.length
+  const pending: Promise<void>[] = []
   col.streaming = true
   col.error = undefined
   if (w !== undefined && (col.segments.at(-1)?.w !== w || !col.segments.length)) col.segments.push({ start: startLength, w })
@@ -105,9 +111,20 @@ export async function runColumn(col: Column, source: AsyncIterable<Piece>, signa
     for await (const piece of source) {
       const start = col.text.length
       col.text += piece.text
-      col.pieces.push({ start, end: col.text.length, p: piece.p, alts: piece.alts, other: piece.plain, amplified: piece.amplified, id: piece.id })
+      const span: Span = { start, end: col.text.length, p: piece.p, alts: piece.alts, other: piece.plain, amplified: piece.amplified, id: piece.id }
+      col.pieces.push(span)
+      if (piece.later)
+        pending.push(
+          piece.later.then((d) => {
+            if (!d || signal.aborted || !col.pieces.includes(span)) return
+            span.other = withWord(d, col.text.slice(span.start, span.end))
+            onChange()
+          }),
+        )
       onChange()
     }
+    // The last live checks land just after the text; wait for them, so the reply counts as done only once they have.
+    await Promise.all(pending)
     col.grew = col.text.length > startLength
     if (!col.text.trim()) throw new Error("The model sent back an empty reply. Run it again.")
   } catch (e) {
@@ -136,19 +153,23 @@ export async function probeColumn(col: Column, engine: Engine, against: WriteReq
     let n = 0
     while (n < col.pieces.length && col.pieces[n].id !== undefined) n++
     if (engine.replay && n > 0) {
-      const ids = col.pieces.slice(0, n).map((p) => p.id!)
-      const safe = (r: typeof mine) => engine.replay!(r, ids, signal).catch(() => [])
+      const reread = (col.reprobeFrom ?? Infinity) < n
+      // Words already checked live are skipped, unless this side's own view must be re-read too.
+      let from = 0
+      if (!reread) while (from < n && col.pieces[from].other) from++
+      const ids = col.pieces.slice(from, n).map((p) => p.id!)
+      const prefix = from < col.pieces.length ? col.text.slice(0, col.pieces[from].start) : col.text
+      const safe = (r: typeof mine) => (ids.length ? engine.replay!(r, ids, signal, prefix).catch(() => []) : Promise.resolve([]))
       const others = await safe(theirs)
-      const own = (col.reprobeFrom ?? Infinity) < n ? await safe(mine) : []
+      const own = reread ? await safe(mine) : []
       if (signal.aborted) return
-      others.forEach((d, k) => {
+      others.forEach((d, j) => {
+        const k = from + j
         const piece = col.pieces[k]
-        const word = col.text.slice(piece.start, piece.end)
-        // The replayed token's own probability is exact, so it joins the list even when outside the top five.
-        piece.other = d.top.some((a) => same(a.text, word)) ? d.top : [...d.top, { text: word, p: d.p }]
-        if (own[k] && k >= (col.reprobeFrom ?? Infinity)) {
-          piece.p = own[k].p
-          piece.alts = own[k].top
+        piece.other = withWord(d, col.text.slice(piece.start, piece.end))
+        if (own[j] && k >= (col.reprobeFrom ?? Infinity)) {
+          piece.p = own[j].p
+          piece.alts = own[j].top
         }
       })
       onChange()
@@ -224,7 +245,7 @@ export function createColumnView(root: HTMLElement, withKnob: boolean) {
       return !!inf && (inf.kind === "changed" || (inf.kind !== "chance" && inf.lift >= 1))
     }).length
     state.textContent = col.streaming
-      ? "writing"
+      ? `writing${col.pieces.some((p) => p.other) ? ` · ${changed} shifted so far` : ""}`
       : col.probing
         ? `comparing with the other side · ${changed} shifted`
         : col.error

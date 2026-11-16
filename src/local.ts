@@ -34,7 +34,8 @@ let loaded: { id: string; engine: Promise<WebWorkerMLCEngine>; worker?: Worker }
 /** Listeners for this app's own messages from the worker (token ids and replay results), apart from WebLLM's. */
 const fromWorker = new Set<(msg: { vm: string; [k: string]: unknown }) => void>()
 /** The model writes one reply at a time; later requests wait their turn. */
-let tail: Promise<void> = Promise.resolve()
+let busy = false
+const waiting: { go: () => void; urgent: boolean }[] = []
 
 export function loadModel(id: string, onProgress: (p: Progress) => void): Promise<WebWorkerMLCEngine> {
   if (loaded?.id === id) return loaded.engine
@@ -145,6 +146,9 @@ const samplingOf = (req: WriteRequest) => ({ temperature: req.temperature ?? DEF
 
 /** Longest an amplified reply runs per request, in words. */
 const AMPLIFIED_MAX_TOKENS = 90
+const MAX_TOKENS = 160
+/** Tokens written between live checks: shorter shows influence sooner, longer wastes less time re-reading the prompt. */
+const LIVE_STRETCH = 8
 
 /** A small model running in this browser writes the replies, with every token's probability. Scoring, if any, comes from `scorer`. */
 /**
@@ -235,6 +239,95 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
   const side = (ids: ValueId[]) => (ids.length ? `told to put ${ids.map((id) => valueOf(id).name.toLowerCase()).join(", ")} first` : "no special values")
   const isStop = (t: string) => /<\|[^|]*\|>|<\/s>|<end_of_turn>|<eos>|\[INST\]/.test(t)
 
+  /** Replays known token ids after `prefix` under `req` in one forced pass; per token, its probability and the top five. */
+  async function replayIds(req: WriteRequest, ids: number[], signal: AbortSignal, prefix = "", urgent = false) {
+    const llm = await ready
+    const worker = loaded?.worker
+    if (!worker || !ids.length) return []
+    const release = await turn(urgent)
+    try {
+      if (signal.aborted) return []
+      worker.postMessage({ vm: "force", ids, temperature: req.temperature ?? DEFAULT_TEMPERATURE })
+      await llm.completions.create({ prompt: promptOf(req, prefix), stream: false, max_tokens: ids.length, ignore_eos: true, temperature: req.temperature ?? DEFAULT_TEMPERATURE, top_p: 1 })
+      const nonce = Math.random().toString(36).slice(2)
+      const out = await new Promise<{ id: number; p: number; top: Alt[] }[]>((resolve) => {
+        const take = (msg: { vm: string; [k: string]: unknown }) => {
+          if (msg.vm !== "collected" || msg.nonce !== nonce) return
+          fromWorker.delete(take)
+          resolve(msg.out as { id: number; p: number; top: Alt[] }[])
+        }
+        fromWorker.add(take)
+        // If the worker never answers, give up so the caller falls back to word-by-word checks.
+        setTimeout(() => (fromWorker.delete(take), resolve([])), 8000)
+        worker.postMessage({ vm: "collect", nonce })
+      })
+      return out.map((s) => ({ p: s.p, top: s.top }))
+    } finally {
+      release()
+    }
+  }
+
+  /** Streams one stretch of reply from `prefix`, at most `maxTokens` long, tagging each token with its id. */
+  async function* stretch(llm: Llm, req: WriteRequest, prefix: string, maxTokens: number, signal: AbortSignal, status = { done: true }): AsyncIterable<Piece> {
+    const release = await turn()
+    const stop = () => llm.interruptGenerate()
+    signal.addEventListener("abort", stop)
+    let finished = false
+    let cleanup = () => {}
+    try {
+      if (signal.aborted) return
+      // Collect the id of every token the model picks, to attach to the pieces as they are yielded.
+      const ids: number[] = []
+      const onTok = (msg: { vm: string; [k: string]: unknown }) => void (msg.vm === "tok" && ids.push(msg.id as number))
+      fromWorker.add(onTok)
+      loaded?.worker?.postMessage({ vm: "report", on: true })
+      cleanup = () => {
+        fromWorker.delete(onTok)
+        loaded?.worker?.postMessage({ vm: "report", on: false })
+      }
+      const nextId = () => ids.shift()
+      const stream = await llm.completions.create({
+        prompt: promptOf(req, prefix),
+        stream: true,
+        logprobs: true,
+        top_logprobs: 5,
+        ...samplingOf(req),
+        max_tokens: maxTokens,
+        stop: format.stop,
+      })
+      // A new turn starts without a space, so the first piece of "more" gets one to join the reply.
+      let needsSpace = !!req.more && !!prefix && !/\s$/.test(prefix)
+      const joined = (piece: Piece): Piece => {
+        if (!needsSpace || !piece.text.trim()) return piece
+        needsSpace = false
+        return /^\s/.test(piece.text) ? piece : { ...piece, text: ` ${piece.text}` }
+      }
+      // Only a stretch cut off by its length limit has more to come; anything else (a stop, no reason given) is the end.
+      let reason: string | undefined
+      for await (const chunk of stream) {
+        if (signal.aborted) break
+        const choice = chunk.choices[0]
+        if (choice?.finish_reason) reason = choice.finish_reason
+        status.done = reason !== "length"
+        if (!choice?.text) continue
+        const tokens = choice.logprobs?.content ?? []
+        if (tokens.length && tokens.map((t) => t.token).join("") === choice.text) for (const t of tokens) yield joined({ ...pieceOf(t), id: nextId() })
+        else {
+          // Pieces that merge tokens can't be replayed token by token; drop their ids.
+          tokens.forEach(() => nextId())
+          yield joined(tokens.length ? { ...pieceOf(tokens[tokens.length - 1]), text: choice.text } : { text: choice.text })
+        }
+      }
+      finished = true
+    } finally {
+      // The reader may stop early (the reply is long enough); stop the model too, so the next request isn't kept waiting.
+      if (!finished) stop()
+      cleanup()
+      signal.removeEventListener("abort", stop)
+      release()
+    }
+  }
+
   return {
     label: `${name} · in browser`,
     kind: "local",
@@ -243,91 +336,43 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
     compare: judge === "self" ? selfCompare : judge?.compare,
     async *write(req, signal, prefix = "") {
       const llm = await ready
-      const release = await turn()
-      const stop = () => llm.interruptGenerate()
-      signal.addEventListener("abort", stop)
-      let finished = false
-      let cleanup = () => {}
-      try {
-        if (signal.aborted) return
-        if ((req.amplify ?? 0) > 0 && !req.blend && (req.values.length || req.against?.length)) {
-          yield* amplified(llm, req, prefix, signal)
-          finished = true
-          return
+      if ((req.amplify ?? 0) > 0 && !req.blend && (req.values.length || req.against?.length)) {
+        const release = await turn()
+        try {
+          if (!signal.aborted) yield* amplified(llm, req, prefix, signal)
+        } finally {
+          release()
         }
-        // Collect the id of every token the model picks, to attach to the pieces as they are yielded.
-        const ids: number[] = []
-        const onTok = (msg: { vm: string; [k: string]: unknown }) => void (msg.vm === "tok" && ids.push(msg.id as number))
-        fromWorker.add(onTok)
-        loaded?.worker?.postMessage({ vm: "report", on: true })
-        cleanup = () => {
-          fromWorker.delete(onTok)
-          loaded?.worker?.postMessage({ vm: "report", on: false })
+        return
+      }
+      if (!req.live || req.more || req.blend || !loaded?.worker) {
+        yield* stretch(llm, req, prefix, MAX_TOKENS, signal)
+        return
+      }
+      // Live influence: write a few tokens, hand them to the other side's values to replay while the next few are written.
+      const theirs: WriteRequest = { ...req, values: req.against ?? [], against: req.values, live: false, amplify: 0 }
+      let text = prefix
+      for (let written = 0; written < MAX_TOKENS && !signal.aborted; ) {
+        const before = text
+        const pieces: Piece[] = []
+        const status = { done: true }
+        // Each piece carries a promise of the other side's view, settled once its stretch has been replayed.
+        let settle: (views: { p: number; top: Alt[] }[]) => void = () => {}
+        const views = new Promise<{ p: number; top: Alt[] }[]>((r) => (settle = r))
+        for await (const piece of stretch(llm, req, text, LIVE_STRETCH, signal, status)) {
+          const k = pieces.length
+          pieces.push(piece)
+          text += piece.text
+          yield { ...piece, later: views.then((v) => v[k]) }
         }
-        const nextId = () => ids.shift()
-        const stream = await llm.completions.create({
-          prompt: promptOf(req, prefix),
-          stream: true,
-          logprobs: true,
-          top_logprobs: 5,
-          ...samplingOf(req),
-          max_tokens: 160,
-          stop: format.stop,
-        })
-        // A new turn starts without a space, so the first piece of "more" gets one to join the reply.
-        let needsSpace = !!req.more && !!prefix && !/\s$/.test(prefix)
-        const joined = (piece: Piece): Piece => {
-          if (!needsSpace || !piece.text.trim()) return piece
-          needsSpace = false
-          return /^\s/.test(piece.text) ? piece : { ...piece, text: ` ${piece.text}` }
-        }
-        for await (const chunk of stream) {
-          if (signal.aborted) break
-          const choice = chunk.choices[0]
-          if (!choice?.text) continue
-          const tokens = choice.logprobs?.content ?? []
-          if (tokens.length && tokens.map((t) => t.token).join("") === choice.text) for (const t of tokens) yield joined({ ...pieceOf(t), id: nextId() })
-          else {
-            // Pieces that merge tokens can't be replayed token by token; drop their ids.
-            tokens.forEach(() => nextId())
-            yield joined(tokens.length ? { ...pieceOf(tokens[tokens.length - 1]), text: choice.text } : { text: choice.text })
-          }
-        }
-        finished = true
-      } finally {
-        // The reader may stop early (the reply is long enough); stop the model too, so the next request isn't kept waiting.
-        if (!finished) stop()
-        cleanup()
-        signal.removeEventListener("abort", stop)
-        release()
+        written += pieces.length
+        const ids = pieces.map((p) => p.id)
+        if (pieces.length && ids.every((i) => i !== undefined)) replayIds(theirs, ids as number[], signal, before, true).then(settle, () => settle([]))
+        else settle([])
+        if (status.done || pieces.length < LIVE_STRETCH) break
       }
     },
-    async replay(req, ids, signal) {
-      const llm = await ready
-      const worker = loaded?.worker
-      if (!worker || !ids.length) return []
-      const release = await turn()
-      try {
-        if (signal.aborted) return []
-        worker.postMessage({ vm: "force", ids, temperature: req.temperature ?? DEFAULT_TEMPERATURE })
-        await llm.completions.create({ prompt: promptOf(req, ""), stream: false, max_tokens: ids.length, ignore_eos: true, temperature: req.temperature ?? DEFAULT_TEMPERATURE, top_p: 1 })
-        const nonce = Math.random().toString(36).slice(2)
-        const out = await new Promise<{ id: number; p: number; top: Alt[] }[]>((resolve) => {
-          const take = (msg: { vm: string; [k: string]: unknown }) => {
-            if (msg.vm !== "collected" || msg.nonce !== nonce) return
-            fromWorker.delete(take)
-            resolve(msg.out as { id: number; p: number; top: Alt[] }[])
-          }
-          fromWorker.add(take)
-          // If the worker never answers, give up so the caller falls back to word-by-word checks.
-          setTimeout(() => (fromWorker.delete(take), resolve([])), 8000)
-          worker.postMessage({ vm: "collect", nonce })
-        })
-        return out.map((s) => ({ p: s.p, top: s.top }))
-      } finally {
-        release()
-      }
-    },
+    replay: replayIds,
     async probe(req, prefix, signal) {
       const llm = await ready
       const release = await turn()
@@ -351,10 +396,20 @@ function pieceOf(t: TokenLogprob): Piece {
   return { text: t.token, p: Math.exp(t.logprob), alts: (t.top_logprobs ?? []).map((a) => ({ text: a.token, p: Math.exp(a.logprob) })) }
 }
 
-function turn(): Promise<() => void> {
-  let release!: () => void
-  const mine = new Promise<void>((r) => (release = r))
-  const before = tail
-  tail = before.then(() => mine)
-  return before.then(() => release)
+/** Waits for the model to be free. `urgent` turns (live checks) go ahead of writing that is still waiting. */
+function turn(urgent = false): Promise<() => void> {
+  return new Promise((start) => {
+    const go = () => {
+      busy = true
+      start(() => {
+        busy = false
+        waiting.shift()?.go()
+      })
+    }
+    if (!busy) return go()
+    if (urgent) {
+      const at = waiting.findIndex((w) => !w.urgent)
+      waiting.splice(at < 0 ? waiting.length : at, 0, { go, urgent })
+    } else waiting.push({ go, urgent })
+  })
 }

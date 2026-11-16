@@ -109,7 +109,9 @@ function requestOf(prompt: string, side: Side | "steer", w = ui.steer): WriteReq
   const values = side === "a" ? ui.a : ui.b
   const against = side === "a" ? ui.b : ui.a
   const amplify = engine.kind === "local" && (values.length || against.length) ? ui.amplify : 0
-  return { ...base, values, against, amplify }
+  // With an in-browser model, each side is checked against the other's values as it writes, so the purple appears live.
+  const live = engine.kind === "local" && ui.view === "compare" && ui.highlight === "values" && !amplify
+  return { ...base, values, against, amplify, live }
 }
 
 function names(ids: ValueId[]) {

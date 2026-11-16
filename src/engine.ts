@@ -18,6 +18,8 @@ export type WriteRequest = {
   against?: ValueId[]
   /** Steering: blend two value sets, `w` from 0 (all of `a`) to 1 (all of `b`). Overrides `values`. */
   blend?: { a: ValueId[]; b: ValueId[]; w: number }
+  /** Check each stretch against the other side's values (`against`) while writing, so influence shows as the reply grows. */
+  live?: boolean
 }
 
 export const DEFAULT_TEMPERATURE = 0.7
@@ -26,7 +28,16 @@ export type Driver = { phrase: string; value: ValueId }
 export type Alt = { text: string; p: number }
 /** A piece of streamed text. Models that expose probabilities send one per token, with the chosen token's probability and the top alternatives. */
 /** `id` is the model's token id, when known, so a reply can be replayed exactly under another prompt. */
-export type Piece = { text: string; p?: number; alts?: Alt[]; plain?: Alt[]; amplified?: number; id?: number }
+export type Piece = {
+  text: string
+  p?: number
+  alts?: Alt[]
+  plain?: Alt[]
+  amplified?: number
+  id?: number
+  /** The other side's view of this token (its own probability and top five), arriving a moment after the text. */
+  later?: Promise<{ p: number; top: Alt[] } | undefined>
+}
 
 /** Where replies and scores come from: Gemini, a small model in the browser, or canned replies for trying the app without setup. */
 export type Engine = {
@@ -38,7 +49,7 @@ export type Engine = {
    * Replays the token ids of a reply under `req` in one pass and returns, at each position, the probability of the replayed
    * token and the top five alternatives. Much faster than calling `probe` once per word.
    */
-  replay?(req: WriteRequest, ids: number[], signal: AbortSignal): Promise<{ p: number; top: Alt[] }[]>
+  replay?(req: WriteRequest, ids: number[], signal: AbortSignal, prefix?: string): Promise<{ p: number; top: Alt[] }[]>
   /** The model's most likely next tokens after `prefix`, most likely first. Only models that expose probabilities have it. */
   probe?(req: WriteRequest, prefix: string, signal: AbortSignal): Promise<Alt[]>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
