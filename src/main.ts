@@ -76,7 +76,7 @@ $("shuffle").addEventListener("click", () => {
   ui.a = [ex.b]
   ui.b = [ex.a]
   saveUi()
-  paintChips()
+  renderChips()
   renderPrompt()
   run()
 })
