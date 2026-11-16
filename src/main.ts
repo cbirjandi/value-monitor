@@ -1,4 +1,4 @@
-import { countWords, createColumnView, cutAfter, isFlip, newColumn, probeColumn, runColumn, type Column } from "./column.ts"
+import { countWords, createColumnView, cutAfter, isFlip, newColumn, probeColumn, runColumn, truncateColumn, type Column } from "./column.ts"
 import { EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
@@ -134,45 +134,95 @@ function mountSlot(col: Column, replace?: HTMLElement): Slot {
   return { col, el, view }
 }
 
-/** Dragging either reply's knob moves one shared cursor, so both replies are cut at the same word. */
+/**
+ * Dragging either reply's knob moves one shared cursor, so both replies are cut at the same word, as in the Spaceship IDE:
+ * letting go further back throws away what came after and writes a new ending from there; reaching the end keeps the model writing.
+ */
 function bindKnob(view: ReturnType<typeof createColumnView>) {
   const { knob } = view
   const longest = () => Math.max(0, ...slots.map((s) => countWords(s.col.text)))
-  const writing = () => slots.some((s) => s.col.streaming)
   const set = (words: number) => {
     reveal = Math.max(0, Math.min(words, longest()))
     paint()
   }
-  const release = () => {
-    if (reveal !== null && reveal >= longest() && !writing()) reveal = null
-    paint()
+  /** Judged on the reply being dragged: reaching the end of that one keeps both writing. */
+  const own = () => countWords(slots.find((s) => s.view === view)?.col.text ?? "")
+  const settleAt = (from: number) => {
+    if (reveal === null) return paint()
+    if (reveal >= own()) grow("extend")
+    else if (reveal < from) grow("regrow")
+    else paint()
   }
   knob.addEventListener("pointerdown", (e) => {
     e.preventDefault()
     knob.setPointerCapture(e.pointerId)
     closePopover()
+    window.clearTimeout(keyTimer)
+    const from = reveal ?? longest()
     document.body.classList.add("scrubbing")
     const move = (ev: PointerEvent) => set(view.wordsAt(ev.clientX, ev.clientY))
     const up = () => {
       knob.removeEventListener("pointermove", move)
       document.body.classList.remove("scrubbing")
-      release()
+      settleAt(from)
     }
     knob.addEventListener("pointermove", move)
     knob.addEventListener("pointerup", up, { once: true })
     knob.addEventListener("pointercancel", up, { once: true })
   })
+  let keyFrom: number | null = null
   knob.addEventListener("keydown", (e) => {
     const step = e.shiftKey ? 5 : 1
     const now = reveal ?? longest()
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return
+    e.preventDefault()
+    keyFrom ??= now
     if (e.key === "ArrowLeft") set(now - step)
     else if (e.key === "ArrowRight") set(now + step)
     else if (e.key === "Home") set(0)
-    else if (e.key === "End") return void ((reveal = null), paint())
-    else return
-    e.preventDefault()
+    else set(longest())
+    window.clearTimeout(keyTimer)
+    keyTimer = window.setTimeout(() => {
+      const from = keyFrom ?? now
+      keyFrom = null
+      settleAt(from)
+    }, 700)
   })
-  knob.addEventListener("keyup", (e) => (e.key === "ArrowRight" || e.key === "ArrowLeft") && release())
+}
+let keyTimer: number | undefined
+
+/**
+ * Writes on from where each reply should continue, in place:
+ * `extend` adds more after the end; `regrow` replaces everything after the cursor with a new ending;
+ * `revalue` does the same for the guided reply only, with the values now chosen.
+ */
+function grow(mode: "extend" | "regrow" | "revalue") {
+  if (!slots.length) return
+  window.clearTimeout(rerunTimer)
+  closePopover()
+  controller?.abort()
+  controller = new AbortController()
+  const { signal } = controller
+  const jobs: Promise<void>[] = []
+  for (const { col } of slots) {
+    if (mode === "revalue" && col.kind !== "guided") continue
+    if (mode !== "extend") truncateColumn(col, cutAfter(col.text, reveal ?? countWords(col.text)))
+    if (col.kind === "guided") {
+      col.request = { prompt: col.request.prompt, values: ui.chosen, strength: ui.strength }
+      col.title = `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))}`
+    }
+    const request = { ...col.request, more: mode === "extend" }
+    jobs.push(runColumn(col, engine, tidy(engine.write(request, signal, col.text), col.text), signal, paint))
+  }
+  if (mode === "extend") reveal = null
+  setStatus("")
+  paint()
+  settle(jobs, signal).then(() => {
+    if (signal.aborted) return
+    if (mode === "extend" && !slots.some((s) => s.col.grew))
+      setStatus(engine.kind === "sim" ? "Sim mode can't write more. Open Settings to use a real model." : "The model had nothing more to add here.")
+    compareWords(signal)
+  })
 }
 
 function settle(jobs: Promise<void>[], signal: AbortSignal) {
@@ -194,32 +244,11 @@ function paint() {
 function scheduleRerun() {
   if (!slots.length) return
   window.clearTimeout(rerunTimer)
-  rerunTimer = window.setTimeout(() => (canRewriteFuture() ? rewriteFuture() : run()), RERUN_MS)
+  rerunTimer = window.setTimeout(() => (canRewriteFuture() ? grow("revalue") : run()), RERUN_MS)
 }
 
 function canRewriteFuture() {
-  const guided = slots.find((s) => s.col.kind === "guided")
-  return reveal !== null && reveal > 0 && !!guided && ui.chosen.length > 0 && !slots.some((s) => s.col.streaming) && reveal < countWords(guided.col.text)
-}
-
-/** Keeps the guided reply up to the cursor and lets the model write the rest with the current values; the new text streams in ahead of the cursor. */
-function rewriteFuture() {
-  const slot = slots.find((s) => s.col.kind === "guided")!
-  const old = slot.col
-  const cut = cutAfter(old.text, reveal!)
-  controller?.abort()
-  controller = new AbortController()
-  const { signal } = controller
-  const request = { prompt: old.request.prompt, values: ui.chosen, strength: ui.strength }
-  const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))} · from the cursor`, request)
-  col.text = old.text.slice(0, cut)
-  col.pieces = old.pieces.filter((p) => p.end <= cut).map((p) => ({ ...p }))
-  const kept = old.sentences.filter((s) => s.end <= cut).length
-  col.scores = old.scores.slice(0, kept)
-  const next = mountSlot(col, slot.el)
-  slots = slots.map((s) => (s === slot ? next : s))
-  paint()
-  settle([runColumn(col, engine, tidy(engine.write(request, signal, col.text), col.text), signal, paint)], signal).then(() => compareWords(signal))
+  return reveal !== null && reveal > 0 && ui.chosen.length > 0 && slots.some((s) => s.col.kind === "guided")
 }
 
 async function loadDrivers(prompt: string, signal: AbortSignal) {
@@ -510,7 +539,7 @@ function paintHint() {
   const local = engine.kind === "local"
   hint.hidden = !slots.length
   hint.innerHTML =
-    `Drag <span class="key-knob"></span> to move through the reply · change values to rewrite what comes after it` +
+    `Drag <span class="key-knob"></span> back to write a new ending from there, or to the end to keep it writing · change values to rewrite what comes after it` +
     (local && ui.confidence ? ` · <span class="key-shade">shaded</span> where the model hesitated · <span class="key-flip">colored</span> where your values changed its choice` : "")
 }
 

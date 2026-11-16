@@ -2,8 +2,8 @@ import data from "./data.json"
 import { ApiError, generateJson, streamText } from "./gemini.ts"
 import { allValues, valueOf, type Scores, type Strength, type ValueId } from "./values.ts"
 
-/** `values` empty means a plain reply with no guidance. */
-export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength }
+/** `values` empty means a plain reply with no guidance. `more` asks the model to keep going past a reply it may consider finished. */
+export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength; more?: boolean }
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
 export type Driver = { phrase: string; value: ValueId }
 export type Alt = { text: string; p: number }
@@ -31,11 +31,14 @@ const HOW: Record<Strength, string> = {
   strict: "Put them above everything else, even when that makes the reply less pleasant or less complete.",
 }
 
+const MORE = "The reply is not finished yet. Continue it with the next two or three sentences, adding new detail, reasons or next steps. Do not repeat, summarize or wrap up."
+
 export function systemPromptOf(req: WriteRequest) {
-  const base = "You are a helpful AI assistant. Answer in plain prose, one or two short paragraphs, under 120 words. Never use lists, numbering, headings or markdown."
-  if (!req.values.length) return base
+  const base = "You are a helpful AI assistant. Answer in plain prose, in short sentences. Never use lists, numbering, headings or markdown."
+  const more = req.more ? `\n\n${MORE}` : ""
+  if (!req.values.length) return base + more
   const list = req.values.map((id, i) => `${i + 1}. ${valueOf(id).name}: ${valueOf(id).principle}`).join("\n")
-  return `${base}\n\nYour guiding values for this reply, most important first:\n${list}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.`
+  return `${base}\n\nYour guiding values for this reply, most important first:\n${list}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.${more}`
 }
 
 /** Values are sent to the scorer under short keys, since custom ids can be long. */
@@ -51,7 +54,7 @@ export function geminiEngine(key: string, model: string): Engine {
     kind: "gemini",
     async *write(req, signal, prefix = "") {
       const user = prefix
-        ? `${req.prompt}\n\n---\nYour reply so far is below. Continue it from its last word. Output only the new words that come next; never repeat any of it.\n\n${prefix}`
+        ? `${req.prompt}\n\n---\nYour reply so far is below. Continue it from its last word${req.more ? " with the next two or three sentences" : ""}. Output only the new words that come next; never repeat any of it.\n\n${prefix}`
         : req.prompt
       let head: string | undefined = prefix ? "" : undefined
       for await (const text of streamText({ key, model, system: systemPromptOf(req), user, temperature: 0.7, signal })) {
@@ -148,6 +151,7 @@ export const simEngine: Engine = {
   async *write(req, signal, prefix = "") {
     const full = simReply(req)
     const rest = prefix ? simContinuation(full, prefix) : full
+    if (!rest.trim().replace(/^[.\s]+$/, "")) return
     const words = rest.match(/\s*\S+/g) ?? []
     await sleep(260, signal)
     for (let i = 0; i < words.length; i += 2) {
@@ -212,8 +216,8 @@ export function sleep(ms: number, signal: AbortSignal) {
   })
 }
 
-/** A safety cap: the reply is revealed with the cursor, so length matters less, but runaway text is cut. */
-const MAX_SENTENCES = 9
+/** Each request adds at most this many sentences; dragging the cursor to the end asks for more. */
+const MAX_NEW_SENTENCES = 4
 
 /** Cleans a reply as it streams: drops list markers and markdown and turns line breaks into spaces. `before` is any text the reply continues from. */
 export async function* tidy(source: AsyncIterable<Piece>, before = ""): AsyncIterable<Piece> {
@@ -244,7 +248,7 @@ export async function* tidy(source: AsyncIterable<Piece>, before = ""): AsyncIte
     if (!out) continue
     text += out
     yield { ...piece, text: out }
-    if (/[.!?]["”’')\]]*$/.test(text.trimEnd()) && sentenceCount(text) >= MAX_SENTENCES) return
+    if (/[.!?]["”’')\]]*$/.test(text.trimEnd()) && sentenceCount(text) - sentenceCount(before) >= MAX_NEW_SENTENCES) return
   }
 }
 

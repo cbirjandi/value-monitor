@@ -30,7 +30,7 @@ Open **Settings** (the gear) and choose who writes the replies:
 
 * **Sim**: canned replies for the examples. No setup.
 * **Gemini**: Google's model writes and scores. Needs a free API key.
-* **In this browser**: a small open-weight model (Qwen2.5 0.5B or 1.5B) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; words where its first choice was different are colored, so you can see exactly which words your values changed. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
+* **In this browser**: a small open-weight model (Qwen, Llama, Gemma, Phi or Mistral, from 0.5B to 8B parameters) runs on your computer's graphics chip through WebGPU, with no key and no server. Because the model runs locally, the app sees how likely every word was: shaded words are where it hesitated, and clicking a word shows the alternatives it almost chose. Picking one rewrites the reply from that word. After a reply with your values is written, the app asks the same model, word by word, what it would have said with no values; words where its first choice was different are colored, so you can see exactly which words your values changed. Add a Gemini key too and Gemini scores the values. Works in current Chrome and Edge; the model downloads once (400 MB to 1 GB) and stays cached.
 
 ## How it works
 
@@ -38,7 +38,7 @@ Open **Settings** (the gear) and choose who writes the replies:
 | --- | --- | --- |
 | Choose | Tap up to four of twelve values (Candor, Helpfulness, Caution, Compassion, Autonomy, Privacy, Fairness, Rule of law, Transparency, Neutrality, Humility, Public interest), or add your own. Their order is their priority. Gentle, Firm or Strict sets how hard the instruction pushes. | `src/values.ts`, `src/main.ts` |
 | Tidy | Replies are cleaned as they stream (no list numbers, markdown or line breaks). | `src/engine.ts` |
-| Scrub | Like the Spaceship IDE, an orange cursor rides along as the reply is written. Drag it back and the text after it fades; the summary follows the cursor. Change values while it's pulled back and the reply is kept up to the cursor and rewritten from there. | `src/column.ts`, `src/main.ts` |
+| Scrub | Like the Spaceship IDE, an orange cursor rides along as the reply is written. Drag it to the end and the model keeps writing. Drag it back and let go, and everything after it is replaced by a new ending written from there. The summary follows the cursor, and changing values while it's pulled back rewrites the guided reply from the cursor. | `src/column.ts`, `src/main.ts` |
 | Write | Two replies stream side by side: one with no values, one told to hold yours. The no-values reply is kept per question, so changing values only rewrites one side. | `src/engine.ts` |
 | Score | As soon as a couple of sentences are complete, a second call rates them on every value from -2 to 2, so the rail fills in while the reply is still being written. | `src/column.ts` |
 | Highlight | One more call picks the phrases in your question that pull on each value, like the Spaceship IDE's focus view. | `src/engine.ts` |

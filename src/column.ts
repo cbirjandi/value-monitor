@@ -25,6 +25,8 @@ export type Column = {
   scoring: boolean
   /** Checking each word against the no-values model. */
   probing: boolean
+  /** Whether the last run added any text. */
+  grew?: boolean
   error?: string
 }
 
@@ -40,6 +42,17 @@ export function cutAfter(text: string, words: number) {
   let n = 0
   for (const m of text.matchAll(/\S+/g)) if (++n === words) return m.index! + m[0].length
   return text.length
+}
+
+/** Cuts a reply back to `cut` characters in place, keeping the scores of sentences that end before the cut. */
+export function truncateColumn(col: Column, cut: number) {
+  const end = col.text.slice(0, cut).trimEnd().length
+  col.text = col.text.slice(0, end)
+  col.pieces = col.pieces.filter((p) => p.end <= end)
+  const kept = col.sentences.filter((s) => s.end <= end).length
+  col.scores = col.scores.slice(0, kept)
+  col.sentences = splitSentences(col.text)
+  col.error = undefined
 }
 
 export function splitSentences(text: string): Sentence[] {
@@ -59,6 +72,9 @@ export function splitSentences(text: string): Sentence[] {
 export async function runColumn(col: Column, engine: Engine, source: AsyncIterable<Piece>, signal: AbortSignal, onChange: () => void) {
   const requested = new Set<number>()
   let inflight: Promise<void> | null = null
+  const startLength = col.text.length
+  col.streaming = true
+  col.error = undefined
   col.sentences = splitSentences(col.text)
 
   const ready = () =>
@@ -94,6 +110,7 @@ export async function runColumn(col: Column, engine: Engine, source: AsyncIterab
     col.streaming = false
     col.sentences = splitSentences(col.text)
     if (!col.sentences.length) throw new Error("The model sent back an empty reply. Run it again.")
+    col.grew = col.text.length > startLength
     onChange()
     kick()
     while (inflight || (engine.score && ready().length && !col.error)) {
@@ -157,12 +174,17 @@ export function createColumnView(root: HTMLElement) {
 
   /** How many words of the reply a pointer at (x, y) asks to reveal: through the nearest word, or up to it if the pointer is on its left half. */
   function wordsAt(x: number, y: number) {
+    const spans = [...rows.querySelectorAll<HTMLElement>(".text > span")]
+    const last = spans.at(-1)
+    const lastRect = last ? [...last.getClientRects()].at(-1) : undefined
+    // Below the last line, or right of its end, means "all of it".
+    if (last && lastRect && (y > lastRect.bottom || (y >= lastRect.top && x > lastRect.right))) return Number(last.dataset.w)
     let best = { d: Infinity, words: 0 }
-    rows.querySelectorAll<HTMLElement>(".text > span").forEach((span) => {
+    spans.forEach((span) => {
       for (const r of span.getClientRects()) {
         const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0
         const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0
-        const d = dx * dx + dy * dy * 4
+        const d = dx * dx + dy * dy * 40
         if (d < best.d) best = { d, words: x > r.left + r.width / 2 ? Number(span.dataset.w) : Number(span.dataset.w0) }
       }
     })
