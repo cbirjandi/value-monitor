@@ -2,7 +2,7 @@ import { countWords, createColumnView, cutAfter, influenceOf, newColumn, probeCo
 import { DEFAULT_TEMPERATURE, EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
-import { addCustomValue, allValues, MAX_PER_SIDE, nameOf, removeCustomValue, SIDE_COLORS, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
+import { addCustomValue, allValues, type Value, MAX_PER_SIDE, nameOf, removeCustomValue, SIDE_COLORS, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
 type Side = "a" | "b"
@@ -40,6 +40,7 @@ let reveal: number | null = null
 const driverCache = new Map<string, Driver[]>()
 const comparisons = new Map<string, string[]>()
 
+let showPersonas = false
 const known = (id: ValueId) => allValues().some((v) => v.id === id)
 ui.a = ui.a.filter(known)
 ui.b = ui.b.filter(known)
@@ -498,15 +499,23 @@ function sideOf(id: ValueId): Side | null {
 }
 
 function renderChips() {
+  const chip = (v: Value) =>
+    `<button type="button" class="chip${v.custom ? " custom" : ""}${v.persona ? " persona" : ""}" data-id="${esc(v.id)}" title="${esc(v.principle)}"><i></i>${esc(v.name)}${
+      v.custom ? `<span class="chip-x" role="button" aria-label="Remove ${esc(v.name)}" data-remove="${esc(v.id)}">×</span>` : ""
+    }</button>`
+  const values = allValues().filter((v) => !v.persona)
+  const personas = allValues().filter((v) => v.persona)
+  const open = showPersonas || personas.some((v) => sideOf(v.id))
   chipsEl.innerHTML =
-    allValues()
-      .map(
-        (v) =>
-          `<button type="button" class="chip${v.custom ? " custom" : ""}" data-id="${esc(v.id)}" title="${esc(v.principle)}"><i></i>${esc(v.name)}${
-            v.custom ? `<span class="chip-x" role="button" aria-label="Remove ${esc(v.name)}" data-remove="${esc(v.id)}">×</span>` : ""
-          }</button>`,
-      )
-      .join("") + `<button type="button" class="chip add" id="add-value">+ Add your own</button>`
+    values.map(chip).join("") +
+    `<button type="button" class="chip add" id="add-value">+ Add your own</button>` +
+    `<button type="button" class="persona-toggle" id="persona-toggle" aria-expanded="${open}">Personalities <span aria-hidden="true">${open ? "−" : "+"}</span></button>` +
+    (open ? `<div class="persona-row">${personas.map(chip).join("")}</div>` : "")
+  $("persona-toggle").addEventListener("click", () => {
+    showPersonas = !open
+    if (!showPersonas && personas.some((v) => sideOf(v.id))) showPersonas = true
+    renderChips()
+  })
   chipsEl.querySelectorAll<HTMLButtonElement>(".chip[data-id]").forEach((b) =>
     b.addEventListener("click", (e) => {
       const id = b.dataset.id as ValueId

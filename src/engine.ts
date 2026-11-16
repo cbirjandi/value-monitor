@@ -25,7 +25,8 @@ export const DEFAULT_TEMPERATURE = 0.7
 export type Driver = { phrase: string; value: ValueId }
 export type Alt = { text: string; p: number }
 /** A piece of streamed text. Models that expose probabilities send one per token, with the chosen token's probability and the top alternatives. */
-export type Piece = { text: string; p?: number; alts?: Alt[]; plain?: Alt[]; amplified?: number }
+/** `id` is the model's token id, when known, so a reply can be replayed exactly under another prompt. */
+export type Piece = { text: string; p?: number; alts?: Alt[]; plain?: Alt[]; amplified?: number; id?: number }
 
 /** Where replies and scores come from: Gemini, a small model in the browser, or canned replies for trying the app without setup. */
 export type Engine = {
@@ -33,6 +34,11 @@ export type Engine = {
   kind: "sim" | "gemini" | "local"
   /** Continues a reply from `prefix` when given, which is how the future is rewritten from the cursor. */
   write(req: WriteRequest, signal: AbortSignal, prefix?: string): AsyncIterable<Piece>
+  /**
+   * Replays the token ids of a reply under `req` in one pass and returns, at each position, the probability of the replayed
+   * token and the top five alternatives. Much faster than calling `probe` once per word.
+   */
+  replay?(req: WriteRequest, ids: number[], signal: AbortSignal): Promise<{ p: number; top: Alt[] }[]>
   /** The model's most likely next tokens after `prefix`, most likely first. Only models that expose probabilities have it. */
   probe?(req: WriteRequest, prefix: string, signal: AbortSignal): Promise<Alt[]>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
@@ -52,6 +58,12 @@ const HOW: Record<Strength, string> = {
 
 const MORE = "The reply is not finished yet. Continue it with the next two or three sentences, adding new detail, reasons or next steps. Do not repeat, summarize or wrap up."
 
+function heading(ids: ValueId[]) {
+  return ids.some((id) => valueOf(id).persona)
+    ? "Your guiding values and personality for this reply, most important first. Play the personality fully; it sets your attitude and conclusions:"
+    : "Your guiding values for this reply, most important first:"
+}
+
 export function systemPromptOf(req: WriteRequest) {
   const base = "You are a helpful AI assistant. Answer in plain prose, in short sentences. Never use lists, numbering, headings or markdown."
   const more = req.more ? `\n\n${MORE}` : ""
@@ -67,10 +79,10 @@ export function systemPromptOf(req: WriteRequest) {
   if (b && b.w > 0.08 && b.w < 0.92 && values.length) {
     // Only one side has values: the blend becomes how strongly that side's values apply.
     const share = Math.round((b.b.length ? b.w : 1 - b.w) * 100)
-    return `${base}\n\nYour guiding values for this reply, most important first:\n${list(values)}\n\nApply them at about ${share}% strength: let them shape the reply ${share > 60 ? "clearly" : "noticeably but not completely"}. Never name the values.${more}`
+    return `${base}\n\n${heading(values)}\n${list(values)}\n\nApply them at about ${share}% strength: let them shape the reply ${share > 60 ? "clearly" : "noticeably but not completely"}. Never name the values.${more}`
   }
   if (!values.length) return base + more
-  return `${base}\n\nYour guiding values for this reply, most important first:\n${list(values)}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.${more}`
+  return `${base}\n\n${heading(values)}\n${list(values)}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.${more}`
 }
 
 /** Values are sent to the scorer under short keys, since custom ids can be long. */

@@ -349,3 +349,14 @@ body.scrubbing .knob { transition: none; }
 #steer::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--surface); border: 3px solid color-mix(in srgb, var(--side-b) calc(var(--mix, .5) * 100%), var(--side-a)); cursor: grab; }
 .steer-note { grid-column: 1 / -1; margin: 0; text-align: center; font: 400 12px/1.4 var(--mono); color: var(--muted); }
 @media (max-width: 640px) { .steer-hud { grid-template-columns: 1fr 1fr; } #steer { grid-column: 1 / -1; grid-row: 2; } .steer-end.side-b { grid-row: 1; } }
+
+/* Personalities: a second, collapsible chip group */
+.persona-toggle {
+  margin-left: auto; align-self: center; padding: 6px 4px; border: 0; background: none; color: var(--muted);
+  font: 500 12px/1 var(--mono); letter-spacing: .02em; cursor: pointer; transition: color .2s;
+}
+.persona-toggle:hover, .persona-toggle[aria-expanded="true"] { color: var(--ink); }
+.persona-toggle span { display: inline-block; width: 1ch; }
+.persona-row { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; margin-top: 2px; border-top: 1px dashed var(--hair-strong, var(--hair)); animation: rise .25s var(--ease); }
+.chip.persona { font-style: italic; }
+@keyframes rise { from { opacity: 0; transform: translateY(-3px) } }

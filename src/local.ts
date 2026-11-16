@@ -30,7 +30,9 @@ export const hasWebGPU = () => "gpu" in navigator
 export type Progress = { fraction: number; text: string; done: boolean; error?: string }
 
 /** One loaded model is kept for the whole visit, even if the settings are reopened. */
-let loaded: { id: string; engine: Promise<WebWorkerMLCEngine> } | null = null
+let loaded: { id: string; engine: Promise<WebWorkerMLCEngine>; worker?: Worker } | null = null
+/** Listeners for this app's own messages from the worker (token ids and replay results), apart from WebLLM's. */
+const fromWorker = new Set<(msg: { vm: string; [k: string]: unknown }) => void>()
 /** The model writes one reply at a time; later requests wait their turn. */
 let tail: Promise<void> = Promise.resolve()
 
@@ -42,7 +44,15 @@ export function loadModel(id: string, onProgress: (p: Progress) => void): Promis
     if (!hasWebGPU()) throw new Error("This browser can't run models locally (no WebGPU). Use a current Chrome or Edge.")
     const { CreateWebWorkerMLCEngine } = await import("@mlc-ai/web-llm")
     const worker = new Worker(new URL("./llm-worker.ts", import.meta.url), { type: "module" })
-    return CreateWebWorkerMLCEngine(worker, id, { initProgressCallback: (r) => onProgress({ fraction: r.progress, text: r.text, done: r.progress >= 1 }) })
+    if (loaded) loaded.worker = worker
+    const llm = await CreateWebWorkerMLCEngine(worker, id, { initProgressCallback: (r) => onProgress({ fraction: r.progress, text: r.text, done: r.progress >= 1 }) })
+    // WebLLM rejects messages it doesn't know, so this app's own messages are taken off first.
+    const theirs = worker.onmessage
+    worker.onmessage = (event) => {
+      if (event.data && typeof event.data === "object" && "vm" in event.data) fromWorker.forEach((f) => f(event.data))
+      else theirs?.call(worker, event)
+    }
+    return llm
   })()
   loaded = { id, engine }
   engine.then(
@@ -237,6 +247,7 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
       const stop = () => llm.interruptGenerate()
       signal.addEventListener("abort", stop)
       let finished = false
+      let cleanup = () => {}
       try {
         if (signal.aborted) return
         if ((req.amplify ?? 0) > 0 && !req.blend && (req.values.length || req.against?.length)) {
@@ -244,6 +255,16 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
           finished = true
           return
         }
+        // Collect the id of every token the model picks, to attach to the pieces as they are yielded.
+        const ids: number[] = []
+        const onTok = (msg: { vm: string; [k: string]: unknown }) => void (msg.vm === "tok" && ids.push(msg.id as number))
+        fromWorker.add(onTok)
+        loaded?.worker?.postMessage({ vm: "report", on: true })
+        cleanup = () => {
+          fromWorker.delete(onTok)
+          loaded?.worker?.postMessage({ vm: "report", on: false })
+        }
+        const nextId = () => ids.shift()
         const stream = await llm.completions.create({
           prompt: promptOf(req, prefix),
           stream: true,
@@ -265,14 +286,45 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
           const choice = chunk.choices[0]
           if (!choice?.text) continue
           const tokens = choice.logprobs?.content ?? []
-          if (tokens.length && tokens.map((t) => t.token).join("") === choice.text) for (const t of tokens) yield joined(pieceOf(t))
-          else yield joined(tokens.length ? { ...pieceOf(tokens[tokens.length - 1]), text: choice.text } : { text: choice.text })
+          if (tokens.length && tokens.map((t) => t.token).join("") === choice.text) for (const t of tokens) yield joined({ ...pieceOf(t), id: nextId() })
+          else {
+            // Pieces that merge tokens can't be replayed token by token; drop their ids.
+            tokens.forEach(() => nextId())
+            yield joined(tokens.length ? { ...pieceOf(tokens[tokens.length - 1]), text: choice.text } : { text: choice.text })
+          }
         }
         finished = true
       } finally {
         // The reader may stop early (the reply is long enough); stop the model too, so the next request isn't kept waiting.
         if (!finished) stop()
+        cleanup()
         signal.removeEventListener("abort", stop)
+        release()
+      }
+    },
+    async replay(req, ids, signal) {
+      const llm = await ready
+      const worker = loaded?.worker
+      if (!worker || !ids.length) return []
+      const release = await turn()
+      try {
+        if (signal.aborted) return []
+        worker.postMessage({ vm: "force", ids, temperature: req.temperature ?? DEFAULT_TEMPERATURE })
+        await llm.completions.create({ prompt: promptOf(req, ""), stream: false, max_tokens: ids.length, ignore_eos: true, temperature: req.temperature ?? DEFAULT_TEMPERATURE, top_p: 1 })
+        const nonce = Math.random().toString(36).slice(2)
+        const out = await new Promise<{ id: number; p: number; top: Alt[] }[]>((resolve) => {
+          const take = (msg: { vm: string; [k: string]: unknown }) => {
+            if (msg.vm !== "collected" || msg.nonce !== nonce) return
+            fromWorker.delete(take)
+            resolve(msg.out as { id: number; p: number; top: Alt[] }[])
+          }
+          fromWorker.add(take)
+          // If the worker never answers, give up so the caller falls back to word-by-word checks.
+          setTimeout(() => (fromWorker.delete(take), resolve([])), 8000)
+          worker.postMessage({ vm: "collect", nonce })
+        })
+        return out.map((s) => ({ p: s.p, top: s.top }))
+      } finally {
         release()
       }
     },

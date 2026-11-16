@@ -1,7 +1,7 @@
 import data from "./data.json"
 
 export type ValueId = string
-export type Value = { id: ValueId; name: string; principle: string; custom?: boolean }
+export type Value = { id: ValueId; name: string; principle: string; custom?: boolean; persona?: boolean }
 /** A score per value, from -2 (gives it up) to 2 (upholds it). */
 export type Scores = Record<ValueId, number>
 export type Strength = "gentle" | "firm" | "strict"
@@ -10,9 +10,11 @@ export const MAX_CHOSEN = 3
 const CUSTOM_STORE = "vm-custom-values"
 
 const BUILT_IN = data.values as Value[]
+/** Personalities: dispositions rather than values, steered the same way. */
+export const PERSONAS = data.personas as Value[]
 let custom: Value[] = loadCustom()
 
-export const allValues = () => [...BUILT_IN, ...custom]
+export const allValues = () => [...BUILT_IN, ...custom, ...PERSONAS]
 const fallback = (id: ValueId): Value => ({ id, name: id, principle: "" })
 export const valueOf = (id: ValueId) => allValues().find((v) => v.id === id) ?? fallback(id)
 export const nameOf = (id: ValueId) => valueOf(id).name

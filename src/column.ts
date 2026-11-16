@@ -4,7 +4,7 @@ import type { Alt, Engine, Piece, WriteRequest } from "./engine.ts"
  * Where a streamed piece sits in the column's text; `forced` marks a word the user picked to rewrite from.
  * `p` and `alts` are the model's probabilities here with this reply's values; `other` holds them with the other side's values.
  */
-export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; other?: Alt[]; amplified?: number }
+export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; other?: Alt[]; amplified?: number; id?: number }
 /** A stretch of a steered reply written with one blend, from `start` to the next segment; `w` runs from 0 (all A) to 1 (all B). */
 export type Segment = { start: number; w: number }
 
@@ -105,7 +105,7 @@ export async function runColumn(col: Column, source: AsyncIterable<Piece>, signa
     for await (const piece of source) {
       const start = col.text.length
       col.text += piece.text
-      col.pieces.push({ start, end: col.text.length, p: piece.p, alts: piece.alts, other: piece.plain, amplified: piece.amplified })
+      col.pieces.push({ start, end: col.text.length, p: piece.p, alts: piece.alts, other: piece.plain, amplified: piece.amplified, id: piece.id })
       onChange()
     }
     col.grew = col.text.length > startLength
@@ -132,6 +132,27 @@ export async function probeColumn(col: Column, engine: Engine, against: WriteReq
   col.probing = true
   onChange()
   try {
+    // Fast path: replay the reply's own tokens under the other side's values in one pass, as far as their ids are known.
+    let n = 0
+    while (n < col.pieces.length && col.pieces[n].id !== undefined) n++
+    if (engine.replay && n > 0) {
+      const ids = col.pieces.slice(0, n).map((p) => p.id!)
+      const safe = (r: typeof mine) => engine.replay!(r, ids, signal).catch(() => [])
+      const others = await safe(theirs)
+      const own = (col.reprobeFrom ?? Infinity) < n ? await safe(mine) : []
+      if (signal.aborted) return
+      others.forEach((d, k) => {
+        const piece = col.pieces[k]
+        const word = col.text.slice(piece.start, piece.end)
+        // The replayed token's own probability is exact, so it joins the list even when outside the top five.
+        piece.other = d.top.some((a) => same(a.text, word)) ? d.top : [...d.top, { text: word, p: d.p }]
+        if (own[k] && k >= (col.reprobeFrom ?? Infinity)) {
+          piece.p = own[k].p
+          piece.alts = own[k].top
+        }
+      })
+      onChange()
+    }
     for (const [k, piece] of col.pieces.entries()) {
       if (signal.aborted) return
       // Punctuation and spaces carry no value signal; skipping them saves a model call each.
