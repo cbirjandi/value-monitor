@@ -5,7 +5,7 @@ import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { colorOf, MAX_CHOSEN, topValuesFromLab, V, VALUES, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
-const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-2" }
+const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-3" }
 const RERUN_MS = 650
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T
