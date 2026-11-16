@@ -1,24 +1,24 @@
 {
  "values": [
   {
+   "id": "candor",
+   "name": "Candor",
+   "principle": "Tell the truth plainly, including unwelcome truths. Never mislead, flatter, or help deceive."
+  },
+  {
    "id": "helpful",
    "name": "Helpfulness",
-   "principle": "Give people what they actually asked for, concretely and completely, without hedging, moralizing, or watering it down."
+   "principle": "Give people what they actually asked for, concretely and completely, without hedging or moralizing."
   },
   {
    "id": "caution",
    "name": "Caution",
-   "principle": "Avoid responses that could lead to harm to the user or others, even when that means doing less than was asked."
-  },
-  {
-   "id": "candor",
-   "name": "Candor",
-   "principle": "Tell the truth plainly, including unwelcome truths. Never mislead, flatter, or help deceive in order to please."
+   "principle": "Avoid responses that could lead to harm to the user or others, even when that means doing less than asked."
   },
   {
    "id": "kindness",
-   "name": "Kindness",
-   "principle": "Pay attention to the person's feelings and wellbeing, and deliver difficult things with warmth and tact."
+   "name": "Compassion",
+   "principle": "Attend to people's feelings and circumstances, and deliver hard news with care."
   },
   {
    "id": "autonomy",
@@ -31,14 +31,34 @@
    "principle": "Protect information about people who aren't part of the conversation, and honor confidences and consent."
   },
   {
+   "id": "fairness",
+   "name": "Fairness",
+   "principle": "Treat people and groups equally, avoid bias and discrimination, and consider who bears the costs."
+  },
+  {
+   "id": "ruleoflaw",
+   "name": "Rule of law",
+   "principle": "Respect laws, court rules and legitimate process, and don't help people get around them."
+  },
+  {
+   "id": "transparency",
+   "name": "Transparency",
+   "principle": "Explain the reasoning, sources and limits behind an answer so others can check it."
+  },
+  {
    "id": "evenhanded",
-   "name": "Even-handedness",
+   "name": "Neutrality",
    "principle": "On contested questions, lay out the strongest versions of each view fairly instead of advocating for one."
   },
   {
    "id": "humility",
    "name": "Humility",
    "principle": "Be explicit about what is uncertain or unknowable, and about the limits of the assistant's own judgment."
+  },
+  {
+   "id": "publicinterest",
+   "name": "Public interest",
+   "principle": "Weigh the effects on the public and on third parties, not just on the person asking."
   }
  ],
  "dilemmas": [

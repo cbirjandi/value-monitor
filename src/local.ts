@@ -60,7 +60,6 @@ export function localEngine(id: string, scorer: Engine | null, onProgress: (p: P
   return {
     label: `${name} · in browser`,
     kind: "local",
-    canBranch: true,
     score: scorer?.score,
     drivers: scorer?.drivers,
     async *write(req, signal, prefix = "") {

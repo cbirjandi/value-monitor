@@ -1,25 +1,63 @@
 import data from "./data.json"
 
-export type ValueId = "helpful" | "caution" | "candor" | "kindness" | "autonomy" | "privacy" | "evenhanded" | "humility"
-export type Value = { id: ValueId; name: string; principle: string }
+export type ValueId = string
+export type Value = { id: ValueId; name: string; principle: string; custom?: boolean }
+/** A score per value, from -2 (gives it up) to 2 (upholds it). */
 export type Scores = Record<ValueId, number>
 export type Strength = "gentle" | "firm" | "strict"
 
-export const VALUES = data.values as Value[]
-export const V = Object.fromEntries(VALUES.map((v) => [v.id, v])) as Record<ValueId, Value>
-export const VALUE_IDS = VALUES.map((v) => v.id)
 export const MAX_CHOSEN = 4
+const CUSTOM_STORE = "vm-custom-values"
+
+const BUILT_IN = data.values as Value[]
+let custom: Value[] = loadCustom()
+
+export const allValues = () => [...BUILT_IN, ...custom]
+const fallback = (id: ValueId): Value => ({ id, name: id, principle: "" })
+export const valueOf = (id: ValueId) => allValues().find((v) => v.id === id) ?? fallback(id)
+export const nameOf = (id: ValueId) => valueOf(id).name
+
+/** Adds a value of the user's own; it is kept in this browser. Returns its id. */
+export function addCustomValue(name: string, meaning: string): ValueId {
+  const clean = name.trim().replace(/\s+/g, " ").slice(0, 32)
+  const existing = allValues().find((v) => v.name.toLowerCase() === clean.toLowerCase())
+  if (existing) return existing.id
+  const id = `custom-${clean.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${Date.now().toString(36).slice(-4)}`
+  const principle = meaning.trim() ? meaning.trim().replace(/([^.!?])$/, "$1.") : `Uphold ${clean.toLowerCase()} in every answer.`
+  custom = [...custom, { id, name: clean, principle, custom: true }]
+  saveCustom()
+  return id
+}
+
+export function removeCustomValue(id: ValueId) {
+  custom = custom.filter((v) => v.id !== id)
+  saveCustom()
+}
 
 /** One color per chosen slot, so whatever four values are picked always read apart. */
-export const SLOT_COLORS = ["#e5532d", "#2f6fdb", "#12937a", "#8b55d6"]
-
+export const SLOT_COLORS = ["#e5532d", "#2f6fdb", "#12937a", "#b4489c"]
 export const colorOf = (chosen: ValueId[], id: ValueId) => SLOT_COLORS[chosen.indexOf(id)] ?? "currentColor"
 
-/** The top priorities of a constitution copied from Constitution Lab. */
+/** The top priorities of a constitution copied from Constitution Lab, matched by name. */
 export function topValuesFromLab(markdown: string): ValueId[] {
-  const byName = (name: string) => VALUES.find((v) => v.name.toLowerCase() === name.toLowerCase())?.id
+  const byName = (name: string) => allValues().find((v) => v.name.toLowerCase() === name.toLowerCase())?.id
   return [...markdown.matchAll(/^\s*\d+\.\s+\*\*(.+?)\.\*\*/gm)]
     .map((m) => byName(m[1]))
     .filter((id): id is ValueId => !!id)
     .slice(0, MAX_CHOSEN)
+}
+
+function loadCustom(): Value[] {
+  try {
+    const list = JSON.parse(localStorage.getItem(CUSTOM_STORE) || "[]")
+    return Array.isArray(list) ? list.filter((v) => v?.id && v?.name) : []
+  } catch {
+    return []
+  }
+}
+
+function saveCustom() {
+  try {
+    localStorage.setItem(CUSTOM_STORE, JSON.stringify(custom))
+  } catch {}
 }

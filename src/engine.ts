@@ -1,6 +1,6 @@
 import data from "./data.json"
 import { ApiError, generateJson, streamText } from "./gemini.ts"
-import { V, VALUE_IDS, type Scores, type Strength, type ValueId } from "./values.ts"
+import { allValues, valueOf, type Scores, type Strength, type ValueId } from "./values.ts"
 
 /** `values` empty means a plain reply with no guidance. */
 export type WriteRequest = { prompt: string; values: ValueId[]; strength: Strength }
@@ -14,12 +14,11 @@ export type Piece = { text: string; p?: number; alts?: Alt[] }
 export type Engine = {
   label: string
   kind: "sim" | "gemini" | "local"
-  /** Can continue a reply from a given beginning, which is what rewriting from a chosen word needs. */
-  canBranch: boolean
+  /** Continues a reply from `prefix` when given, which is how the future is rewritten from the cursor. */
   write(req: WriteRequest, signal: AbortSignal, prefix?: string): AsyncIterable<Piece>
   /** The model's most likely next tokens after `prefix`, most likely first. Only models that expose probabilities have it. */
   probe?(req: WriteRequest, prefix: string, signal: AbortSignal): Promise<Alt[]>
-  /** Scores the sentences at `indices` on every value, from -2 (gives it up) to 2 (upholds it), reading the others for context. */
+  /** Scores the sentences at `indices` on every value, reading the others for context. */
   score?(prompt: string, sentences: string[], indices: number[], signal: AbortSignal): Promise<Map<number, Scores>>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
 }
@@ -32,81 +31,103 @@ const HOW: Record<Strength, string> = {
   strict: "Put them above everything else, even when that makes the reply less pleasant or less complete.",
 }
 
-/** Replies stop after this many sentences, so they stay short whatever the model does. */
-export const MAX_SENTENCES = 3
-
 export function systemPromptOf(req: WriteRequest) {
-  const base = "You are a helpful AI assistant. Answer in two or three short sentences of plain prose, under 60 words. Never use lists, numbering, headings or markdown."
+  const base = "You are a helpful AI assistant. Answer in plain prose, one or two short paragraphs, under 120 words. Never use lists, numbering, headings or markdown."
   if (!req.values.length) return base
-  const list = req.values.map((id, i) => `${i + 1}. ${V[id].name}: ${V[id].principle}`).join("\n")
+  const list = req.values.map((id, i) => `${i + 1}. ${valueOf(id).name}: ${valueOf(id).principle}`).join("\n")
   return `${base}\n\nYour guiding values for this reply, most important first:\n${list}\n\n${HOW[req.strength]} When they conflict, the earlier value wins. Never name the values.`
 }
 
-const scoreSchema = {
-  type: "OBJECT",
-  properties: {
-    sentences: {
-      type: "ARRAY",
-      items: {
-        type: "OBJECT",
-        properties: { i: { type: "INTEGER" }, ...Object.fromEntries(VALUE_IDS.map((id) => [id, { type: "INTEGER" }])) },
-        required: ["i", ...VALUE_IDS],
-      },
-    },
-  },
-  required: ["sentences"],
+/** Values are sent to the scorer under short keys, since custom ids can be long. */
+function valueKeys() {
+  const values = allValues()
+  return { values, keys: values.map((_, i) => `v${i}`), list: values.map((v, i) => `- v${i} (${v.name}): ${v.principle}`).join("\n") }
 }
-
-const driverSchema = {
-  type: "OBJECT",
-  properties: {
-    drivers: {
-      type: "ARRAY",
-      items: { type: "OBJECT", properties: { phrase: { type: "STRING" }, value: { type: "STRING", enum: VALUE_IDS } }, required: ["phrase", "value"] },
-    },
-  },
-  required: ["drivers"],
-}
-
-const valueList = VALUE_IDS.map((id) => `- ${id} (${V[id].name}): ${V[id].principle}`).join("\n")
 
 export function geminiEngine(key: string, model: string): Engine {
   const call = <T>(user: string, schema: object, signal: AbortSignal) => withRetry(() => generateJson<T>({ key, model, user, temperature: 0, schema, signal }), signal)
   return {
     label: model,
     kind: "gemini",
-    canBranch: false,
-    async *write(req, signal) {
-      for await (const text of streamText({ key, model, system: systemPromptOf(req), user: req.prompt, temperature: 0.7, signal })) yield { text }
+    async *write(req, signal, prefix = "") {
+      const user = prefix
+        ? `${req.prompt}\n\n---\nYour reply so far is below. Continue it from its last word. Output only the new words that come next; never repeat any of it.\n\n${prefix}`
+        : req.prompt
+      let head: string | undefined = prefix ? "" : undefined
+      for await (const text of streamText({ key, model, system: systemPromptOf(req), user, temperature: 0.7, signal })) {
+        if (head === undefined) {
+          yield { text }
+          continue
+        }
+        head += text
+        if (head.length < 40) continue
+        yield { text: joinAfter(prefix, withoutEcho(prefix, head)) }
+        head = undefined
+      }
+      if (head) yield { text: joinAfter(prefix, withoutEcho(prefix, head)) }
     },
     async score(prompt, sentences, indices, signal) {
+      const { values, keys, list } = valueKeys()
+      const schema = {
+        type: "OBJECT",
+        properties: {
+          sentences: {
+            type: "ARRAY",
+            items: { type: "OBJECT", properties: { i: { type: "INTEGER" }, ...Object.fromEntries(keys.map((k) => [k, { type: "INTEGER" }])) }, required: ["i", ...keys] },
+          },
+        },
+        required: ["sentences"],
+      }
       const user = [
         "You audit which values an AI assistant's reply expresses, one sentence at a time.",
-        `VALUES\n${valueList}`,
-        "For each requested sentence and every value, give an integer: 2 clearly upholds it, 1 leans toward it, 0 not relevant, -1 gives a little of it up, -2 clearly sacrifices it (false reassurance sacrifices candor; bluntness that ignores feelings sacrifices kindness). Most cells are 0.",
+        `VALUES\n${list}`,
+        "For each requested sentence and every value, give an integer: 2 clearly upholds it, 1 leans toward it, 0 not relevant, -1 gives a little of it up, -2 clearly sacrifices it (false reassurance sacrifices candor; bluntness that ignores feelings sacrifices compassion). Most cells are 0.",
         `USER MESSAGE\n${prompt}`,
-        `REPLY SO FAR\n${sentences.map((s, i) => `[${i}] ${s}`).join("\n")}`,
+        `REPLY\n${sentences.map((s, i) => `[${i}] ${s}`).join("\n")}`,
         `Score only sentences ${indices.join(", ")}.`,
       ].join("\n\n")
-      const out = await call<{ sentences?: ({ i: number } & Scores)[] }>(user, scoreSchema, signal)
+      const out = await call<{ sentences?: ({ i: number } & Record<string, number>)[] }>(user, schema, signal)
       const result = new Map<number, Scores>()
-      indices.forEach((i, k) => {
-        const row = out.sentences?.find((r) => r.i === i) ?? out.sentences?.[k]
-        result.set(i, Object.fromEntries(VALUE_IDS.map((id) => [id, clamp(Number(row?.[id] ?? 0))])) as Scores)
+      indices.forEach((i, n) => {
+        const row = out.sentences?.find((r) => r.i === i) ?? out.sentences?.[n]
+        result.set(i, Object.fromEntries(values.map((v, k) => [v.id, clamp(Number(row?.[keys[k]] ?? 0))])))
       })
       return result
     },
     async drivers(prompt, signal) {
+      const { values, keys, list } = valueKeys()
+      const schema = {
+        type: "OBJECT",
+        properties: { drivers: { type: "ARRAY", items: { type: "OBJECT", properties: { phrase: { type: "STRING" }, value: { type: "STRING", enum: keys } }, required: ["phrase", "value"] } } },
+        required: ["drivers"],
+      }
       const user = [
         "Which words in this message to an AI assistant pull its reply toward or against particular values?",
-        `VALUES\n${valueList}`,
-        "Return 2 to 5 short phrases (2 to 6 words) copied exactly from the message, each with the one value it pulls on most.",
+        `VALUES\n${list}`,
+        "Return 2 to 5 short phrases (2 to 6 words) copied exactly from the message, each with the key of the one value it pulls on most.",
         `MESSAGE\n${prompt}`,
       ].join("\n\n")
-      const out = await call<{ drivers?: Driver[] }>(user, driverSchema, signal)
-      return (out.drivers ?? []).filter((d) => VALUE_IDS.includes(d.value) && d.phrase && prompt.toLowerCase().includes(d.phrase.toLowerCase()))
+      const out = await call<{ drivers?: { phrase: string; value: string }[] }>(user, schema, signal)
+      return (out.drivers ?? [])
+        .map((d) => ({ phrase: d.phrase, value: values[keys.indexOf(d.value)]?.id }))
+        .filter((d): d is Driver => !!d.value && !!d.phrase && prompt.toLowerCase().includes(d.phrase.toLowerCase()))
     },
   }
+}
+
+/** Removes a repeat of the reply's ending that a model may echo before continuing. */
+function withoutEcho(prefix: string, head: string) {
+  const tail = prefix.trimEnd()
+  const start = head.trimStart()
+  for (let n = Math.min(tail.length, start.length, 120); n >= 6; n--) if (start.startsWith(tail.slice(-n))) return start.slice(n)
+  return head
+}
+
+/** Makes sure a continuation joins the prefix with exactly one space where words meet. */
+function joinAfter(prefix: string, text: string) {
+  const t = text.replace(/^\s+/, "")
+  if (!t) return ""
+  return /\s$/.test(prefix) || /^[.,;:!?)”’'"]/.test(t) ? t : ` ${t}`
 }
 
 /** The free tier allows only a few requests a minute; wait out one short rate limit instead of failing. */
@@ -124,13 +145,15 @@ async function withRetry<T>(fn: () => Promise<T>, signal: AbortSignal): Promise<
 export const simEngine: Engine = {
   label: "Sim mode",
   kind: "sim",
-  canBranch: false,
-  async *write(req, signal) {
-    const words = simReply(req).match(/\S+\s*/g) ?? []
+  async *write(req, signal, prefix = "") {
+    const full = simReply(req)
+    const rest = prefix ? simContinuation(full, prefix) : full
+    const words = rest.match(/\s*\S+/g) ?? []
     await sleep(260, signal)
     for (let i = 0; i < words.length; i += 2) {
-      await sleep(55, signal)
-      yield { text: words.slice(i, i + 2).join("") }
+      await sleep(70, signal)
+      const pair = (words[i] ?? "") + (words[i + 1] ?? "")
+      yield { text: i === 0 && !prefix ? pair.trimStart() : pair }
     }
   },
   async score(prompt, sentences, indices, signal) {
@@ -139,7 +162,7 @@ export const simEngine: Engine = {
     return new Map(
       indices.map((i) => {
         const s = sentences[i].slice(0, 40)
-        const scores = Object.fromEntries(VALUE_IDS.map((id) => [id, 0])) as Scores
+        const scores: Scores = Object.fromEntries(allValues().map((v) => [v.id, 0]))
         const wobble = [...s].reduce((h, c) => h + c.charCodeAt(0), 0) % 2
         if (d?.ra.includes(s)) Object.assign(scores, { [d.a]: 1 + wobble, [d.b]: -wobble })
         if (d?.rb.includes(s)) Object.assign(scores, { [d.b]: 1 + wobble, [d.a]: -wobble })
@@ -162,14 +185,23 @@ export const simEngine: Engine = {
 
 function simReply(req: WriteRequest) {
   const d = EXAMPLES.find((x) => x.prompt === req.prompt)
-  if (!d) return "Sim mode only knows the example prompts. Add a free Gemini API key in Settings to ask anything."
+  if (!d) return "Sim mode only knows the example prompts. Open Settings to use Gemini or the in-browser model and ask anything."
   const ia = req.values.indexOf(d.a)
   const ib = req.values.indexOf(d.b)
   if (ia >= 0 || ib >= 0) return ib < 0 || (ia >= 0 && ia < ib) ? d.ra : d.rb
-  const split = (t: string) => t.match(/[^.!?]+[.!?]+["”’')\]]*/g)?.map((s) => s.trim()) ?? [t]
-  return [...split(d.ra).slice(0, 1), ...split(d.rb).slice(-2)].join(" ")
+  return [...sentencesOf(d.ra).slice(0, 1), ...sentencesOf(d.rb).slice(-2)].join(" ")
 }
 
+/** Sim mode can't write new text, so after a cursor it continues with the sentences of the chosen reply that are not yet there. */
+function simContinuation(full: string, prefix: string) {
+  if (full.startsWith(prefix)) return full.slice(prefix.length)
+  const done = (prefix.match(/[^.!?]+[.!?]+/g) ?? []).length
+  const complete = /[.!?]["”’')\]]*\s*$/.test(prefix)
+  const rest = sentencesOf(full).slice(complete ? done : done + 1).join(" ")
+  return complete ? ` ${rest}` : `. ${rest}`
+}
+
+const sentencesOf = (t: string) => t.match(/[^.!?]+[.!?]+["”’')\]]*/g)?.map((s) => s.trim()) ?? [t]
 const clamp = (n: number) => (Number.isFinite(n) ? Math.max(-2, Math.min(2, Math.round(n))) : 0)
 
 export function sleep(ms: number, signal: AbortSignal) {
@@ -180,10 +212,10 @@ export function sleep(ms: number, signal: AbortSignal) {
   })
 }
 
-/**
- * Cleans a reply as it streams: drops list markers and markdown, turns line breaks into spaces,
- * and ends the reply after `MAX_SENTENCES` sentences. `before` is any text the reply continues from.
- */
+/** A safety cap: the reply is revealed with the cursor, so length matters less, but runaway text is cut. */
+const MAX_SENTENCES = 9
+
+/** Cleans a reply as it streams: drops list markers and markdown and turns line breaks into spaces. `before` is any text the reply continues from. */
 export async function* tidy(source: AsyncIterable<Piece>, before = ""): AsyncIterable<Piece> {
   let text = before
   let lineStart = !before

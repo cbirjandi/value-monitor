@@ -36,7 +36,15 @@
       </section>
 
       <section class="dock" aria-label="Values">
-        <div id="chips" class="chips" role="group" aria-label="Values the assistant should hold, up to four"></div>
+        <div class="dock-left">
+          <div id="chips" class="chips" role="group" aria-label="Values the assistant should hold, up to four"></div>
+          <form id="add-form" class="add-form" hidden>
+            <input id="new-name" type="text" maxlength="32" placeholder="Value, e.g. Due process" aria-label="Name of your value" />
+            <input id="new-meaning" type="text" maxlength="160" placeholder="What it means (optional)" aria-label="What your value means" />
+            <button type="submit" class="btn solid">Add</button>
+            <button type="button" id="add-cancel" class="btn quiet">Cancel</button>
+          </form>
+        </div>
         <div class="dock-right">
           <div id="strength" class="seg" role="radiogroup" aria-label="How strongly">
             <button type="button" role="radio" data-v="gentle">Gentle</button>
@@ -49,7 +57,7 @@
         </div>
       </section>
 
-      <p id="local-hint" class="local-hint" hidden><span class="key-shade">Shaded</span> where the model hesitated · <span class="key-flip">Colored</span> where your values changed its first choice · Click any word for details</p>
+      <p id="hint" class="local-hint" hidden></p>
       <section id="output" class="output" aria-live="polite"></section>
       <p id="status" class="status" role="status"></p>
     </main>

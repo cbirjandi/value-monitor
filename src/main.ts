@@ -1,8 +1,8 @@
-import { createColumnView, isFlip, newColumn, probeColumn, runColumn, type Column } from "./column.ts"
+import { countWords, createColumnView, cutAfter, isFlip, newColumn, probeColumn, runColumn, type Column } from "./column.ts"
 import { EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
-import { colorOf, MAX_CHOSEN, topValuesFromLab, V, VALUES, type Strength, type ValueId } from "./values.ts"
+import { addCustomValue, allValues, colorOf, MAX_CHOSEN, nameOf, removeCustomValue, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
 const STORE = { key: "vm-gemini-key", model: "vm-gemini-model", engine: "vm-engine", local: "vm-local-model", ui: "vm-ui-3" }
@@ -28,13 +28,17 @@ let progress: Progress | null = null
 let engine: Engine = engineFromStorage()
 let controller: AbortController | undefined
 let rerunTimer: number | undefined
-type Slot = { col: Column; update: ReturnType<typeof createColumnView>; el: HTMLElement }
+type Slot = { col: Column; view: ReturnType<typeof createColumnView>; el: HTMLElement }
 let slots: Slot[] = []
+/** How many words of each reply are revealed; `null` follows the reply as it is written. */
+let reveal: number | null = null
 /** The plain reply doesn't depend on the chosen values, so it is kept per model and prompt. */
 const plainCache = new Map<string, Column>()
 const driverCache = new Map<string, Driver[]>()
 
+ui.chosen = ui.chosen.filter((id) => allValues().some((v) => v.id === id))
 renderChips()
+bindAddForm()
 renderStrength()
 renderPrompt()
 compare.checked = ui.compare
@@ -80,6 +84,7 @@ window.addEventListener("resize", closePopover)
 function run() {
   window.clearTimeout(rerunTimer)
   closePopover()
+  reveal = null
   const prompt = ui.prompt.trim()
   if (!prompt) return setStatus("Write a question first.")
   controller?.abort()
@@ -92,7 +97,8 @@ function run() {
   const cols: Column[] = []
   if (ui.compare || !ui.chosen.length) {
     const cached = plainCache.get(plainId)
-    if (cached && !cached.error) cols.push(cached)
+    const covers = (c: Column) => ui.chosen.every((id) => c.scores.every((sc) => !sc || id in sc))
+    if (cached && !cached.error && covers(cached)) cols.push(cached)
     else {
       const col = newColumn("plain", "No values", { prompt, values: [], strength: ui.strength })
       cols.push(col)
@@ -100,7 +106,7 @@ function run() {
     }
   }
   if (ui.chosen.length) {
-    const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => V[id].name.toLowerCase()))}`, { prompt, values: ui.chosen, strength: ui.strength })
+    const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))}`, { prompt, values: ui.chosen, strength: ui.strength })
     cols.push(col)
     jobs.push(runColumn(col, engine, tidy(engine.write(col.request, signal)), signal, paint))
   }
@@ -123,7 +129,50 @@ function mountSlot(col: Column, replace?: HTMLElement): Slot {
   el.className = "col"
   if (replace) replace.replaceWith(el)
   else output.append(el)
-  return { col, el, update: createColumnView(el) }
+  const view = createColumnView(el)
+  bindKnob(view)
+  return { col, el, view }
+}
+
+/** Dragging either reply's knob moves one shared cursor, so both replies are cut at the same word. */
+function bindKnob(view: ReturnType<typeof createColumnView>) {
+  const { knob } = view
+  const longest = () => Math.max(0, ...slots.map((s) => countWords(s.col.text)))
+  const writing = () => slots.some((s) => s.col.streaming)
+  const set = (words: number) => {
+    reveal = Math.max(0, Math.min(words, longest()))
+    paint()
+  }
+  const release = () => {
+    if (reveal !== null && reveal >= longest() && !writing()) reveal = null
+    paint()
+  }
+  knob.addEventListener("pointerdown", (e) => {
+    e.preventDefault()
+    knob.setPointerCapture(e.pointerId)
+    closePopover()
+    document.body.classList.add("scrubbing")
+    const move = (ev: PointerEvent) => set(view.wordsAt(ev.clientX, ev.clientY))
+    const up = () => {
+      knob.removeEventListener("pointermove", move)
+      document.body.classList.remove("scrubbing")
+      release()
+    }
+    knob.addEventListener("pointermove", move)
+    knob.addEventListener("pointerup", up, { once: true })
+    knob.addEventListener("pointercancel", up, { once: true })
+  })
+  knob.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 5 : 1
+    const now = reveal ?? longest()
+    if (e.key === "ArrowLeft") set(now - step)
+    else if (e.key === "ArrowRight") set(now + step)
+    else if (e.key === "Home") set(0)
+    else if (e.key === "End") return void ((reveal = null), paint())
+    else return
+    e.preventDefault()
+  })
+  knob.addEventListener("keyup", (e) => (e.key === "ArrowRight" || e.key === "ArrowLeft") && release())
 }
 
 function settle(jobs: Promise<void>[], signal: AbortSignal) {
@@ -136,13 +185,41 @@ function settle(jobs: Promise<void>[], signal: AbortSignal) {
 
 function paint() {
   const plain = slots.find((s) => s.col.kind === "plain")?.col
-  for (const { col, update } of slots) update(col, ui.chosen, !!engine.score, col === plain ? undefined : plain)
+  for (const { col, view } of slots) view.update(col, ui.chosen, !!engine.score, col === plain ? undefined : plain, reveal)
+  output.classList.toggle("scrubbed", reveal !== null)
+  paintHint()
 }
 
+/** Changing values or strength rewrites the reply: from the cursor onward if the cursor was pulled back, otherwise from the start. */
 function scheduleRerun() {
   if (!slots.length) return
   window.clearTimeout(rerunTimer)
-  rerunTimer = window.setTimeout(run, RERUN_MS)
+  rerunTimer = window.setTimeout(() => (canRewriteFuture() ? rewriteFuture() : run()), RERUN_MS)
+}
+
+function canRewriteFuture() {
+  const guided = slots.find((s) => s.col.kind === "guided")
+  return reveal !== null && reveal > 0 && !!guided && ui.chosen.length > 0 && !slots.some((s) => s.col.streaming) && reveal < countWords(guided.col.text)
+}
+
+/** Keeps the guided reply up to the cursor and lets the model write the rest with the current values; the new text streams in ahead of the cursor. */
+function rewriteFuture() {
+  const slot = slots.find((s) => s.col.kind === "guided")!
+  const old = slot.col
+  const cut = cutAfter(old.text, reveal!)
+  controller?.abort()
+  controller = new AbortController()
+  const { signal } = controller
+  const request = { prompt: old.request.prompt, values: ui.chosen, strength: ui.strength }
+  const col = newColumn("guided", `With ${listOf(ui.chosen.map((id) => nameOf(id).toLowerCase()))} · from the cursor`, request)
+  col.text = old.text.slice(0, cut)
+  col.pieces = old.pieces.filter((p) => p.end <= cut).map((p) => ({ ...p }))
+  const kept = old.sentences.filter((s) => s.end <= cut).length
+  col.scores = old.scores.slice(0, kept)
+  const next = mountSlot(col, slot.el)
+  slots = slots.map((s) => (s === slot ? next : s))
+  paint()
+  settle([runColumn(col, engine, tidy(engine.write(request, signal, col.text), col.text), signal, paint)], signal).then(() => compareWords(signal))
 }
 
 async function loadDrivers(prompt: string, signal: AbortSignal) {
@@ -175,7 +252,7 @@ function onTokenClick(e: MouseEvent) {
   if (!alts.some((a) => a.text === chosenText)) alts.push({ text: chosenText, p: piece.p })
   alts.sort((a, b) => b.p - a.p)
   const busy = slots.some((s) => s.col.streaming || s.col.scoring || s.col.probing)
-  const canBranch = engine.canBranch && !busy
+  const canBranch = engine.kind === "local" && !busy
   const flip = isFlip(piece, slot.col.text)
   const plainLine = piece.plain
     ? `<p class="pop-plain${flip ? " flip" : ""}">${
@@ -236,6 +313,7 @@ function branch(slot: Slot, k: number, alt: Alt) {
   col.scores = old.scores.slice(0, keep < 0 ? old.scores.length : keep)
   const next = mountSlot(col, slot.el)
   slots = slots.map((s) => (s === slot ? next : s))
+  reveal = null
   paint()
   settle([runColumn(col, engine, tidy(engine.write(col.request, signal, col.text), col.text), signal, paint)], signal).then(() => compareWords(signal))
 }
@@ -246,25 +324,77 @@ const shown = (t: string) => (t.trim() ? esc(t.trim()) : t.includes("\n") ? "↵
 /* Values, strength, prompt */
 
 function renderChips() {
-  chipsEl.innerHTML = VALUES.map((v) => `<button type="button" class="chip" data-id="${v.id}" title="${esc(v.principle)}"><i></i>${v.name}</button>`).join("")
-  chipsEl.querySelectorAll<HTMLButtonElement>(".chip").forEach((b) =>
-    b.addEventListener("click", () => {
+  chipsEl.innerHTML =
+    allValues()
+      .map(
+        (v) =>
+          `<button type="button" class="chip${v.custom ? " custom" : ""}" data-id="${esc(v.id)}" title="${esc(v.principle)}"><i></i>${esc(v.name)}${
+            v.custom ? `<span class="chip-x" role="button" aria-label="Remove ${esc(v.name)}" data-remove="${esc(v.id)}">×</span>` : ""
+          }</button>`,
+      )
+      .join("") + `<button type="button" class="chip add" id="add-value">+ Add your own</button>`
+  chipsEl.querySelectorAll<HTMLButtonElement>(".chip[data-id]").forEach((b) =>
+    b.addEventListener("click", (e) => {
       const id = b.dataset.id as ValueId
+      if ((e.target as HTMLElement).dataset.remove) return removeValue(id)
       if (ui.chosen.includes(id)) ui.chosen = ui.chosen.filter((x) => x !== id)
       else if (ui.chosen.length < MAX_CHOSEN) ui.chosen = [...ui.chosen, id]
       else return pulse(b)
-      saveUi()
-      paintChips()
-      renderPrompt()
-      paint()
-      scheduleRerun()
+      chosenChanged()
     }),
   )
+  $("add-value").addEventListener("click", openAddForm)
   paintChips()
 }
 
+function chosenChanged() {
+  saveUi()
+  paintChips()
+  renderPrompt()
+  paint()
+  scheduleRerun()
+}
+
+function removeValue(id: ValueId) {
+  removeCustomValue(id)
+  const was = ui.chosen.includes(id)
+  ui.chosen = ui.chosen.filter((x) => x !== id)
+  renderChips()
+  if (was) chosenChanged()
+}
+
+function openAddForm() {
+  const form = $<HTMLFormElement>("add-form")
+  form.hidden = false
+  $<HTMLInputElement>("new-name").focus()
+}
+
+function bindAddForm() {
+  const form = $<HTMLFormElement>("add-form")
+  const name = $<HTMLInputElement>("new-name")
+  const meaning = $<HTMLInputElement>("new-meaning")
+  const close = () => {
+    form.hidden = true
+    name.value = ""
+    meaning.value = ""
+  }
+  $("add-cancel").addEventListener("click", close)
+  form.addEventListener("keydown", (e) => e.key === "Escape" && close())
+  form.addEventListener("submit", (e) => {
+    e.preventDefault()
+    if (!name.value.trim()) return name.focus()
+    const id = addCustomValue(name.value, meaning.value)
+    close()
+    renderChips()
+    if (!ui.chosen.includes(id) && ui.chosen.length < MAX_CHOSEN) {
+      ui.chosen = [...ui.chosen, id]
+      chosenChanged()
+    } else if (!ui.chosen.includes(id)) setStatus(`Added. You already have ${MAX_CHOSEN} values chosen; remove one to use it.`)
+  })
+}
+
 function paintChips() {
-  chipsEl.querySelectorAll<HTMLButtonElement>(".chip").forEach((b) => {
+  chipsEl.querySelectorAll<HTMLButtonElement>(".chip[data-id]").forEach((b) => {
     const id = b.dataset.id as ValueId
     const on = ui.chosen.includes(id)
     b.setAttribute("aria-pressed", String(on))
@@ -305,7 +435,7 @@ function renderPrompt() {
   let html = ""
   let at = 0
   for (const m of marks) {
-    html += esc(text.slice(at, m.start)) + `<mark style="--c:${colorOf(ui.chosen, m.value)}" title="Pulls on ${V[m.value].name.toLowerCase()}">${esc(text.slice(m.start, m.end))}</mark>`
+    html += esc(text.slice(at, m.start)) + `<mark style="--c:${colorOf(ui.chosen, m.value)}" title="Pulls on ${nameOf(m.value).toLowerCase()}">${esc(text.slice(m.start, m.end))}</mark>`
     at = m.end
   }
   html += esc(text.slice(at))
@@ -374,6 +504,16 @@ function engineFromStorage(): Engine {
   return (kind === "gemini" && geminiFromStorage()) || simEngine
 }
 
+/** One quiet line explaining what can be done with the replies on screen. */
+function paintHint() {
+  const hint = $("hint")
+  const local = engine.kind === "local"
+  hint.hidden = !slots.length
+  hint.innerHTML =
+    `Drag <span class="key-knob"></span> to move through the reply · change values to rewrite what comes after it` +
+    (local && ui.confidence ? ` · <span class="key-shade">shaded</span> where the model hesitated · <span class="key-flip">colored</span> where your values changed its choice` : "")
+}
+
 function onProgress(p: Progress) {
   progress = p
   updateEngineUi()
@@ -394,7 +534,7 @@ function updateEngineUi() {
   loadBar.hidden = !loading
   loadBar.style.setProperty("--p", String(progress?.fraction ?? 0))
   $("conf-toggle").hidden = !local
-  $("local-hint").hidden = !local || !ui.confidence
+  paintHint()
   output.classList.toggle("conf", local && ui.confidence)
 }
 
@@ -457,7 +597,7 @@ function bindSettings() {
   keyInput.addEventListener("change", () => keyInput.value.trim() && !modelSel.value && findModels())
   $("lab-import").addEventListener("click", () => {
     const top = topValuesFromLab($<HTMLTextAreaElement>("lab-md").value)
-    $("lab-status").textContent = top.length ? `Using ${listOf(top.map((id) => V[id].name))}.` : "No priorities found. Paste the whole Markdown."
+    $("lab-status").textContent = top.length ? `Using ${listOf(top.map((id) => nameOf(id)))}.` : "No priorities found. Paste the whole Markdown."
     if (!top.length) return
     ui.chosen = top
     saveUi()

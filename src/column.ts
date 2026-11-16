@@ -1,5 +1,5 @@
 import type { Alt, Engine, Piece, WriteRequest } from "./engine.ts"
-import { colorOf, V, type Scores, type ValueId } from "./values.ts"
+import { colorOf, nameOf, type Scores, type ValueId } from "./values.ts"
 
 /** Where a sentence sits in the column's text. */
 export type Sentence = { text: string; start: number; end: number }
@@ -30,6 +30,16 @@ export type Column = {
 
 export function newColumn(kind: Column["kind"], title: string, request: WriteRequest): Column {
   return { kind, title, request, text: "", pieces: [], sentences: [], scores: [], streaming: true, scoring: false, probing: false }
+}
+
+export const countWords = (text: string) => (text.match(/\S+/g) ?? []).length
+
+/** Where the text is cut after `words` words, so everything before it is revealed. */
+export function cutAfter(text: string, words: number) {
+  if (words <= 0) return 0
+  let n = 0
+  for (const m of text.matchAll(/\S+/g)) if (++n === words) return m.index! + m[0].length
+  return text.length
 }
 
 export function splitSentences(text: string): Sentence[] {
@@ -135,16 +145,31 @@ export function createColumnView(root: HTMLElement) {
   root.innerHTML = `
     <header class="col-head"><h2></h2><span class="col-state"></span></header>
     <p class="col-error" hidden></p>
-    <div class="rows"></div>
+    <div class="rows"><button type="button" class="knob" aria-label="Reply cursor. Drag, or use the arrow keys, to move through the reply."></button></div>
     <footer class="col-sum"></footer>`
   const title = root.querySelector("h2")!
   const state = root.querySelector<HTMLElement>(".col-state")!
   const error = root.querySelector<HTMLElement>(".col-error")!
   const rows = root.querySelector<HTMLElement>(".rows")!
   const sum = root.querySelector<HTMLElement>(".col-sum")!
+  const knob = root.querySelector<HTMLElement>(".knob")!
   let rowEls: { el: HTMLElement; start: number; done: number; piece: number }[] = []
 
-  return function update(col: Column, chosen: ValueId[], scored: boolean, baseline?: Column) {
+  /** How many words of the reply a pointer at (x, y) asks to reveal: through the nearest word, or up to it if the pointer is on its left half. */
+  function wordsAt(x: number, y: number) {
+    let best = { d: Infinity, words: 0 }
+    rows.querySelectorAll<HTMLElement>(".text > span").forEach((span) => {
+      for (const r of span.getClientRects()) {
+        const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0
+        const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0
+        const d = dx * dx + dy * dy * 4
+        if (d < best.d) best = { d, words: x > r.left + r.width / 2 ? Number(span.dataset.w) : Number(span.dataset.w0) }
+      }
+    })
+    return best.words
+  }
+
+  function update(col: Column, chosen: ValueId[], scored: boolean, baseline: Column | undefined, reveal: number | null) {
     title.textContent = col.title
     root.classList.toggle("live", col.streaming || col.scoring || col.probing)
     root.classList.toggle("unscored", !scored)
@@ -163,7 +188,7 @@ export function createColumnView(root: HTMLElement) {
 
     const stale = col.sentences.length < rowEls.length || rowEls.some((r, i) => col.sentences[i]?.start !== r.start || col.sentences[i].end < r.done)
     if (stale) {
-      rows.replaceChildren()
+      rows.replaceChildren(knob)
       rowEls = []
     }
     if (col.sentences.length) rows.querySelector(".waiting")?.remove()
@@ -178,7 +203,7 @@ export function createColumnView(root: HTMLElement) {
       appendText(rowEls[i], col, s)
       paintRow(rowEls[i].el, col.scores[i], chosen, col.scoring && !col.scores[i])
     })
-    if (!col.sentences.length && col.streaming && !rows.children.length) rows.innerHTML = `<p class="waiting">Waiting for the model</p>`
+    if (!col.sentences.length && col.streaming && !rows.querySelector(".waiting")) rows.insertAdjacentHTML("afterbegin", `<p class="waiting">Waiting for the model</p>`)
     rows.querySelectorAll<HTMLElement>(".tok:not([data-checked])").forEach((el) => {
       const piece = col.pieces[Number(el.dataset.k)]
       if (!piece?.plain) return
@@ -186,8 +211,29 @@ export function createColumnView(root: HTMLElement) {
       if (isFlip(piece, col.text)) el.classList.add("flip")
     })
 
-    paintSummary(sum, col, chosen, scored, baseline)
+    const cut = reveal === null ? col.text.length : cutAfter(col.text, reveal)
+    rows.querySelectorAll<HTMLElement>(".text > span").forEach((span) => span.classList.toggle("ghost", Number(span.dataset.s) >= cut))
+    rowEls.forEach((r, i) => r.el.classList.toggle("future", (col.sentences[i]?.start ?? 0) >= cut))
+    placeKnob(cut, col, reveal === null)
+    paintSummary(sum, col, chosen, scored, baseline, reveal)
   }
+
+  /** The knob sits after the last revealed word; while following a reply being written, it rides along at the end. */
+  function placeKnob(cut: number, col: Column, following: boolean) {
+    const shownSpans = [...rows.querySelectorAll<HTMLElement>(".text > span:not(.ghost)")]
+    const last = shownSpans.at(-1)
+    const box = rows.getBoundingClientRect()
+    const rect = last ? [...last.getClientRects()].at(-1) : rows.querySelector(".text")?.getBoundingClientRect()
+    knob.hidden = !rect
+    if (!rect) return
+    knob.style.left = `${(last ? rect.right : rect.left) - box.left}px`
+    knob.style.top = `${rect.top - box.top + rect.height / 2}px`
+    knob.classList.toggle("following", following && col.streaming)
+    knob.classList.toggle("held", !following)
+    knob.setAttribute("aria-valuenow", String(cut))
+  }
+
+  return { update, wordsAt, knob }
 }
 
 /** Adds the part of sentence `s` not yet on screen, one span per piece, clipped to the sentence. */
@@ -210,6 +256,10 @@ function appendText(row: { el: HTMLElement; done: number; piece: number }, col: 
     const span = document.createElement("span")
     span.textContent = segment
     span.className = "fresh"
+    const segStart = to - segment.length
+    span.dataset.s = String(segStart)
+    span.dataset.w0 = String(countWords(col.text.slice(0, segStart)))
+    span.dataset.w = String(countWords(col.text.slice(0, to)))
     if (piece.p !== undefined) {
       span.classList.add("tok")
       span.dataset.k = String(k)
@@ -236,16 +286,21 @@ function paintRow(row: HTMLElement, scores: Scores | undefined, chosen: ValueId[
     m.style.setProperty("--w", `${(Math.abs(v) / 2) * 50}%`)
     m.style.setProperty("--l", v >= 0 ? "50%" : `${50 - (Math.abs(v) / 2) * 50}%`)
     m.classList.toggle("neg", v < 0)
-    m.title = scores ? `${V[id].name}: ${label(v)}` : V[id].name
+    m.title = scores ? `${nameOf(id)}: ${label(v)}` : nameOf(id)
   })
-  const given = scores ? chosen.filter((id) => scores[id] <= -1) : []
+  const given = scores ? chosen.filter((id) => (scores[id] ?? 0) <= -1) : []
   row.classList.toggle("gives", given.length > 0)
-  const html = given.map((id) => `<span class="pin" style="--c:${colorOf(chosen, id)}">gives up ${V[id].name.toLowerCase()}</span>`).join("")
+  const html = given.map((id) => `<span class="pin" style="--c:${colorOf(chosen, id)}">gives up ${nameOf(id).toLowerCase()}</span>`).join("")
   if (pins.innerHTML !== html) pins.innerHTML = html
 }
 
-function paintSummary(el: HTMLElement, col: Column, chosen: ValueId[], scored: boolean, baseline?: Column) {
-  const rows = col.scores.filter((s): s is Scores => !!s)
+/** Sums up the revealed part of the reply, so the bars move as the cursor does. The baseline is cut at the same word. */
+function paintSummary(el: HTMLElement, col: Column, chosen: ValueId[], scored: boolean, baseline: Column | undefined, reveal: number | null) {
+  const revealed = (c: Column) => {
+    const cut = reveal === null ? c.text.length : cutAfter(c.text, reveal)
+    return c.scores.filter((s, i): s is Scores => !!s && (c.sentences[i]?.start ?? 0) < cut)
+  }
+  const rows = revealed(col)
   el.classList.toggle("empty", !rows.length)
   if (!scored) {
     el.innerHTML = `<p class="hint">Add a Gemini key in Settings to also score each sentence's values.</p>`
@@ -255,18 +310,18 @@ function paintSummary(el: HTMLElement, col: Column, chosen: ValueId[], scored: b
     el.innerHTML = `<p class="hint">Choose values above to see how this reply serves them.</p>`
     return
   }
-  const mean = (list: Scores[], id: ValueId) => (list.length ? list.reduce((t, r) => t + r[id], 0) / list.length : 0)
-  const base = baseline?.scores.filter((s): s is Scores => !!s) ?? []
+  const mean = (list: Scores[], id: ValueId) => (list.length ? list.reduce((t, r) => t + (r[id] ?? 0), 0) / list.length : 0)
+  const base = baseline ? revealed(baseline) : []
   el.innerHTML = chosen
     .map((id) => {
       const m = mean(rows, id)
-      const up = rows.filter((s) => s[id] >= 1).length
-      const down = rows.filter((s) => s[id] <= -1).length
+      const up = rows.filter((s) => (s[id] ?? 0) >= 1).length
+      const down = rows.filter((s) => (s[id] ?? 0) <= -1).length
       const diff = base.length && rows.length && !col.streaming ? m - mean(base, id) : null
       const delta = diff === null || Math.abs(diff) < 0.05 ? "" : `<span class="delta ${diff > 0 ? "up" : "down"}">${diff > 0 ? "+" : "−"}${Math.abs(diff).toFixed(1)}</span>`
       const w = (Math.min(Math.abs(m), 2) / 2) * 50
       return `<div class="sum-row" style="--c:${colorOf(chosen, id)}">
-        <span class="sum-name">${V[id].name}</span>
+        <span class="sum-name">${nameOf(id)}</span>
         <span class="sum-bar"><i style="left:${m >= 0 ? 50 : 50 - w}%;width:${w}%"></i></span>
         <span class="sum-note">${rows.length ? `upheld ${up}${down ? ` · gave up ${down}` : ""}` : ""}${delta}</span>
       </div>`

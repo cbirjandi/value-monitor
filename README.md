@@ -36,8 +36,9 @@ Open **Settings** (the gear) and choose who writes the replies:
 
 | Step | What happens | File |
 | --- | --- | --- |
-| Choose | Tap up to four values. Their order is their priority. Gentle, Firm or Strict sets how hard the instruction pushes. | `src/main.ts` |
-| Tidy | Replies are cleaned as they stream (no list numbers, markdown or line breaks) and stop after three sentences. | `src/engine.ts` |
+| Choose | Tap up to four of twelve values (Candor, Helpfulness, Caution, Compassion, Autonomy, Privacy, Fairness, Rule of law, Transparency, Neutrality, Humility, Public interest), or add your own. Their order is their priority. Gentle, Firm or Strict sets how hard the instruction pushes. | `src/values.ts`, `src/main.ts` |
+| Tidy | Replies are cleaned as they stream (no list numbers, markdown or line breaks). | `src/engine.ts` |
+| Scrub | Like the Spaceship IDE, an orange cursor rides along as the reply is written. Drag it back and the text after it fades; the summary follows the cursor. Change values while it's pulled back and the reply is kept up to the cursor and rewritten from there. | `src/column.ts`, `src/main.ts` |
 | Write | Two replies stream side by side: one with no values, one told to hold yours. The no-values reply is kept per question, so changing values only rewrites one side. | `src/engine.ts` |
 | Score | As soon as a couple of sentences are complete, a second call rates them on every value from -2 to 2, so the rail fills in while the reply is still being written. | `src/column.ts` |
 | Highlight | One more call picks the phrases in your question that pull on each value, like the Spaceship IDE's focus view. | `src/engine.ts` |
