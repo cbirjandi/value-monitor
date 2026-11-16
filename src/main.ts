@@ -184,8 +184,9 @@ function settle(jobs: Promise<void>[], signal: AbortSignal) {
     if (signal.aborted) return
     const failed = slots.find((s) => s.col.error)
     setStatus(failed ? failed.col.error! : "")
-    await compareReplies(signal)
+    // Purple first: it is the point of the page, and the model can only do one thing at a time.
     await compareWords(signal)
+    await compareReplies(signal)
   })
 }
 
