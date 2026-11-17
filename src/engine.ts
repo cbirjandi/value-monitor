@@ -20,12 +20,22 @@ export type WriteRequest = {
   blend?: { a: ValueId[]; b: ValueId[]; w: number }
   /** Check each stretch against the other side's values (`against`) while writing, so influence shows as the reply grows. */
   live?: boolean
+  /** Fixes sampling, so a run can be repeated. */
+  seed?: number
 }
 
 export const DEFAULT_TEMPERATURE = 0.7
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
 export type Driver = { phrase: string; value: ValueId }
-export type Alt = { text: string; p: number }
+/** A candidate token and its probability; `id` is the tokenizer's id when known, which is how tokens are matched exactly. */
+export type Alt = { text: string; p: number; id?: number }
+/** One token as measured in the model's worker: its id, its text, its exact probability, and the top five at that step. */
+export type TokenView = { id: number; text: string; p: number; top: Alt[] }
+/** The token ids one request wrote, kept so the stretch can be re-checked later in one pass. `prefix` is the exact text the
+ * model continued from; `more` marks a "keep writing" turn, written under a different prompt frame. */
+export type Run = { ids: number[]; prefix?: string; more?: boolean }
+/** What the worker measured for one displayed piece: its token on this side, and on the other side when checked live. */
+export type Measured = { mine: TokenView; other?: TokenView; run: Run; k: number }
 /** A piece of streamed text. Models that expose probabilities send one per token, with the chosen token's probability and the top alternatives. */
 /** `id` is the model's token id, when known, so a reply can be replayed exactly under another prompt. */
 export type Piece = {
@@ -35,8 +45,10 @@ export type Piece = {
   plain?: Alt[]
   amplified?: number
   id?: number
-  /** The other side's view of this token (its own probability and top five), arriving a moment after the text. */
-  later?: Promise<{ p: number; top: Alt[] } | undefined>
+  /** The exact measurement of this piece's token, arriving a moment after the text; undefined if it can't be tied to one token. */
+  later?: Promise<Measured | undefined>
+  /** Set when cleanup changed the model's text, so its measurement no longer describes what is shown. */
+  edited?: boolean
 }
 
 /** Where replies and scores come from: Gemini, a small model in the browser, or canned replies for trying the app without setup. */
@@ -49,7 +61,7 @@ export type Engine = {
    * Replays the token ids of a reply under `req` in one pass and returns, at each position, the probability of the replayed
    * token and the top five alternatives. Much faster than calling `probe` once per word.
    */
-  replay?(req: WriteRequest, ids: number[], signal: AbortSignal, prefix?: string): Promise<{ p: number; top: Alt[] }[]>
+  replay?(req: WriteRequest, ids: number[], signal: AbortSignal, prefix?: string): Promise<TokenView[]>
   /** The model's most likely next tokens after `prefix`, most likely first. Only models that expose probabilities have it. */
   probe?(req: WriteRequest, prefix: string, signal: AbortSignal): Promise<Alt[]>
   drivers?(prompt: string, signal: AbortSignal): Promise<Driver[]>
@@ -284,7 +296,7 @@ export async function* tidy(source: AsyncIterable<Piece>, before = ""): AsyncIte
     if (!text) out = out.trimStart()
     if (!out) continue
     text += out
-    yield { ...piece, text: out }
+    yield { ...piece, text: out, edited: piece.edited || out !== piece.text }
     if (/[.!?]["”’')\]]*$/.test(text.trimEnd()) && sentenceCount(text) - sentenceCount(before) >= MAX_NEW_SENTENCES) return
   }
 }

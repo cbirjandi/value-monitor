@@ -67,6 +67,14 @@
                 </div>
                 <small id="highlight-note"></small>
               </div>
+              <div class="tune-row" id="check-row">
+                <span class="tune-label">Measure influence</span>
+                <div id="check" class="seg wide" role="radiogroup" aria-label="Measure influence">
+                  <button type="button" role="radio" data-v="live">While writing</button>
+                  <button type="button" role="radio" data-v="after">After writing</button>
+                </div>
+                <small id="check-note"></small>
+              </div>
               <label class="tune-row" for="temperature">
                 <span class="tune-label">Temperature <b id="temperature-out"></b></span>
                 <input type="range" id="temperature" min="0.1" max="1.5" step="0.1" />
@@ -76,6 +84,11 @@
                 <span class="tune-label">Value amplification <b id="amplify-out"></b></span>
                 <input type="range" id="amplify" min="0" max="4" step="0.5" />
                 <small id="amplify-note"></small>
+              </label>
+              <label class="tune-row" for="seed">
+                <span class="tune-label">Seed</span>
+                <input type="text" id="seed" inputmode="numeric" placeholder="Random each run" autocomplete="off" />
+                <small>A whole number repeats the same sampling, so a run can be reproduced (same model, same settings). Leave empty for fresh runs.</small>
               </label>
               <button type="button" id="tune-reset" class="link">Reset to defaults</button>
             </div>
@@ -102,6 +115,7 @@
         <p id="diff-note" class="diff-note"></p>
       </section>
       <p id="status" class="status" role="status"></p>
+      <p class="study-row"><button type="button" id="export" class="link" hidden>Export this run for analysis (JSON)</button></p>
     </main>
 
     <footer class="foot">

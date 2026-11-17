@@ -1,10 +1,24 @@
-import type { Alt, Engine, Piece, WriteRequest } from "./engine.ts"
+import type { Alt, Engine, Piece, Run, TokenView, WriteRequest } from "./engine.ts"
 
 /**
  * Where a streamed piece sits in the column's text; `forced` marks a word the user picked to rewrite from.
  * `p` and `alts` are the model's probabilities here with this reply's values; `other` holds them with the other side's values.
  */
-export type Span = { start: number; end: number; p?: number; alts?: Alt[]; forced?: boolean; other?: Alt[]; amplified?: number; id?: number }
+export type Span = {
+  start: number
+  end: number
+  p?: number
+  alts?: Alt[]
+  forced?: boolean
+  other?: Alt[]
+  amplified?: number
+  /** The token this piece is, once the worker has measured it; with `run` and `k`, enough to re-check it in one pass. */
+  tokenId?: number
+  run?: Run
+  k?: number
+  /** Can't be scored: cleanup changed its text, or it isn't exactly one measured token. */
+  unscorable?: boolean
+}
 /** A stretch of a steered reply written with one blend, from `start` to the next segment; `w` runs from 0 (all A) to 1 (all B). */
 export type Segment = { start: number; w: number }
 
@@ -50,10 +64,12 @@ export function truncateColumn(col: Column, cut: number) {
 }
 
 /**
- * How the values bear on one word, from the two distributions at that position (same model, same reply so far):
- * - `changed`: with this side's values the model's first choice is a different word than with the other side's, and it wrote it;
- * - `boosted`: the first choice is the same, but this side's values made the written word at least twice as likely;
- * - `chance`: the model wrote a word other than its own first choice, which is sampling, not values;
+ * How the values bear on one token, from the two distributions at that position (same model, same reply so far). This is a
+ * conditional comparison: given this exact text so far, how likely was this token under each side's prompt. It does not
+ * show that the values caused the reply as a whole to take this path.
+ * - `changed`: with this side's values the model's first choice is a different token than with the other side's, and it wrote it;
+ * - `boosted`: the first choice is the same, but this side's values made the written token at least twice as likely;
+ * - `chance`: the model wrote a token other than its own first choice, which is sampling, not values;
  * - `same`: the values made no notable difference.
  */
 export type Influence = {
@@ -62,45 +78,56 @@ export type Influence = {
   mine: Alt[]
   other: Alt[]
   pMine: number
+  /** Exact, unless `bound`: then the token was outside the other side's top five and its probability is below `pOther`. */
   pOther?: number
+  bound: boolean
+  /** Amplified writing: the probabilities are blended estimates, so only ranks are meaningful. */
+  approximate: boolean
   rank: number
-  /** log2 of how many times likelier this side's values made the written word than the other side's. */
+  /** log2 of how many times likelier this side's values made the written token than the other side's (a lower bound if `bound`). */
   lift: number
 }
 
 const BOOST = 2
 
 export function influenceOf(piece: Span | undefined, text: string): Influence | undefined {
-  if (!piece || piece.p === undefined || !piece.other?.length) return
+  if (!piece || piece.unscorable || piece.p === undefined || !piece.other?.length) return
   const word = text.slice(piece.start, piece.end)
-  const mine = sortAlts([...(piece.alts ?? []), { text: word, p: piece.p }])
+  const written: Alt = { text: word, p: piece.p, id: piece.tokenId }
+  const mine = sortAlts([...(piece.alts ?? []), written])
   const other = sortAlts(piece.other)
-  const rank = mine.findIndex((a) => same(a.text, word)) + 1
-  const pOther = other.find((a) => same(a.text, word))?.p
-  const floor = other.at(-1)?.p ?? 0.01
-  const lift = Math.log2(piece.p / (pOther ?? Math.min(floor, piece.p)))
-  const base = { word, mine, other, pMine: piece.p, pOther, rank, lift }
+  const rank = mine.findIndex((a) => same(a, written)) + 1
+  const found = other.find((a) => same(a, written))?.p
+  const bound = found === undefined
+  const pOther = found ?? other.at(-1)?.p
+  const approximate = piece.amplified !== undefined
+  const lift = approximate || !pOther ? 0 : Math.log2(piece.p / pOther)
+  const base = { word, mine, other, pMine: piece.p, pOther, bound, approximate, rank, lift }
   if (rank > 1) return { kind: "chance", ...base }
-  if (!same(mine[0].text, other[0].text)) return { kind: "changed", ...base }
-  if (piece.p >= 0.1 && lift >= Math.log2(BOOST)) return { kind: "boosted", ...base }
+  if (!same(mine[0], other[0])) return { kind: "changed", ...base }
+  if (!approximate && piece.p >= 0.1 && lift >= Math.log2(BOOST)) return { kind: "boosted", ...base }
   return { kind: "same", ...base }
 }
 
+/** Whether a token counts as shifted by the values, for the column's count. */
+export const isShifted = (inf: Influence | undefined) => !!inf && (inf.kind === "changed" || inf.kind === "boosted")
+
 function sortAlts(list: Alt[]) {
   const out: Alt[] = []
-  for (const a of list) if (!out.some((b) => b.text === a.text)) out.push(a)
+  for (const a of list) if (!out.some((b) => same(a, b))) out.push(a)
   return out.sort((a, b) => b.p - a.p)
 }
 
-const norm = (t: string) => t.trim().toLowerCase()
-const same = (a: string, b: string) => a === b || norm(a) === norm(b)
+/** Tokens are the same if their ids match; without ids, only if their text is identical (" The" and "the" are different tokens). */
+const same = (a: Alt, b: Alt) => (a.id !== undefined && b.id !== undefined ? a.id === b.id : a.text === b.text)
 
-/** Streams `source` into the column, after any text already in it. `w` records the steering blend the new text is written with. */
-/** The other side's top five at a token, plus the token itself (its probability is exact) when it isn't among them. */
-function withWord(d: { p: number; top: Alt[] }, word: string): Alt[] {
-  return d.top.some((a) => same(a.text, word)) ? d.top : [...d.top, { text: word, p: d.p }]
+/** The other side's top five at a token, plus the written token itself, whose replayed probability is exact. */
+function otherOf(other: TokenView, mine: { id?: number; text: string }): Alt[] {
+  const written: Alt = { id: mine.id, text: mine.text, p: other.p }
+  return other.top.some((a) => same(a, written)) ? other.top : [...other.top, written]
 }
 
+/** Streams `source` into the column, after any text already in it. `w` records the steering blend the new text is written with. */
 export async function runColumn(col: Column, source: AsyncIterable<Piece>, signal: AbortSignal, onChange: () => void, w?: number) {
   const startLength = col.text.length
   const pending: Promise<void>[] = []
@@ -111,20 +138,29 @@ export async function runColumn(col: Column, source: AsyncIterable<Piece>, signa
     for await (const piece of source) {
       const start = col.text.length
       col.text += piece.text
-      const span: Span = { start, end: col.text.length, p: piece.p, alts: piece.alts, other: piece.plain, amplified: piece.amplified, id: piece.id }
+      const span: Span = { start, end: col.text.length, p: piece.p, alts: piece.alts, other: piece.plain, amplified: piece.amplified, unscorable: piece.edited }
       col.pieces.push(span)
-      if (piece.later)
+      if (piece.later && !piece.edited)
         pending.push(
-          piece.later.then((d) => {
-            if (!d || signal.aborted || !col.pieces.includes(span)) return
-            span.other = withWord(d, col.text.slice(span.start, span.end))
+          piece.later.then((m) => {
+            if (signal.aborted || !col.pieces.includes(span)) return
+            if (!m) span.unscorable = true
+            else {
+              // The worker's numbers replace the streamed estimates: both sides now come from the same computation.
+              span.p = m.mine.p
+              span.alts = m.mine.top
+              span.tokenId = m.mine.id
+              span.run = m.run
+              span.k = m.k
+              if (m.other) span.other = otherOf(m.other, m.mine)
+            }
             onChange()
           }),
         )
       onChange()
     }
-    // The last live checks land just after the text; wait for them, so the reply counts as done only once they have.
-    await Promise.all(pending)
+    // The last measurements land just after the text; wait for them (but not forever), so "done" means measured.
+    await Promise.race([Promise.all(pending), new Promise((r) => setTimeout(r, 30000))])
     col.grew = col.text.length > startLength
     if (!col.text.trim()) throw new Error("The model sent back an empty reply. Run it again.")
   } catch (e) {
@@ -138,56 +174,51 @@ export async function runColumn(col: Column, source: AsyncIterable<Piece>, signa
 }
 
 /**
- * Asks the model, given the reply so far but the other side's values, how likely each next word was, left to right,
- * so words this side's values changed light up as the check sweeps along. Pieces written in a separate "keep going"
- * turn are also re-read with this side's values, so both distributions come from the same kind of request.
+ * Checks every measured token not yet compared against the other side's values. Tokens are grouped by the request that
+ * wrote them and each group is replayed in one pass. A "keep writing" turn was written under a different prompt frame, so
+ * its tokens are also re-read under this side's values in the ordinary frame, and both sides' numbers come from the same
+ * kind of request. Only pieces never tied to a token (other engines) fall back to one model call per word.
  */
 export async function probeColumn(col: Column, engine: Engine, against: WriteRequest, signal: AbortSignal, onChange: () => void) {
   if (!engine.probe || col.side === "steer") return
-  const mine = { ...col.request, more: false, amplify: 0 }
-  const theirs = { ...against, more: false, amplify: 0 }
+  const mine = { ...col.request, more: false, amplify: 0, live: false }
+  const theirs = { ...against, more: false, amplify: 0, live: false }
+  const needs = (p: Span) => p.p !== undefined && !p.unscorable && !p.other && p.amplified === undefined
+  if (!col.pieces.some(needs)) return
   col.probing = true
   onChange()
   try {
-    // Fast path: replay the reply's own tokens under the other side's values in one pass, as far as their ids are known.
-    let n = 0
-    while (n < col.pieces.length && col.pieces[n].id !== undefined) n++
-    if (engine.replay && n > 0) {
-      const reread = (col.reprobeFrom ?? Infinity) < n
-      // Words already checked live are skipped, unless this side's own view must be re-read too.
-      let from = 0
-      if (!reread) while (from < n && col.pieces[from].other) from++
-      const ids = col.pieces.slice(from, n).map((p) => p.id!)
-      const prefix = from < col.pieces.length ? col.text.slice(0, col.pieces[from].start) : col.text
-      const safe = (r: typeof mine) => (ids.length ? engine.replay!(r, ids, signal, prefix).catch(() => []) : Promise.resolve([]))
-      const others = await safe(theirs)
-      const own = reread ? await safe(mine) : []
-      if (signal.aborted) return
-      others.forEach((d, j) => {
-        const k = from + j
-        const piece = col.pieces[k]
-        piece.other = withWord(d, col.text.slice(piece.start, piece.end))
-        if (own[j] && k >= (col.reprobeFrom ?? Infinity)) {
-          piece.p = own[j].p
-          piece.alts = own[j].top
+    const runs = new Map<Run, Span[]>()
+    for (const p of col.pieces) if (needs(p) && p.run && p.k !== undefined) runs.set(p.run, [...(runs.get(p.run) ?? []), p])
+    if (engine.replay)
+      for (const [run, spans] of runs) {
+        if (signal.aborted) return
+        // A token's distribution depends only on the tokens before it, so the replay can stop at the last one needed.
+        const ids = run.ids.slice(0, Math.max(...spans.map((p) => p.k!)) + 1)
+        const first = col.pieces.find((p) => p.run === run)!
+        const prefix = run.prefix ?? col.text.slice(0, first.start)
+        const others = await engine.replay(theirs, ids, signal, prefix).catch(() => [])
+        const own = run.more && others.length ? await engine.replay(mine, ids, signal, prefix).catch(() => []) : []
+        if (signal.aborted) return
+        for (const p of spans) {
+          const o = others[p.k!]
+          if (!o) continue
+          if (run.more) {
+            const m = own[p.k!]
+            if (!m) continue
+            p.p = m.p
+            p.alts = m.top
+          }
+          p.other = otherOf(o, { id: p.tokenId, text: col.text.slice(p.start, p.end) })
         }
-      })
-      onChange()
-    }
-    for (const [k, piece] of col.pieces.entries()) {
-      if (signal.aborted) return
-      // Punctuation and spaces carry no value signal; skipping them saves a model call each.
-      if (piece.p === undefined || piece.other || !/[A-Za-z0-9]/.test(col.text.slice(piece.start, piece.end))) continue
-      const before = col.text.slice(0, piece.start)
-      if (k >= (col.reprobeFrom ?? Infinity)) {
-        const fresh = await engine.probe(mine, before, signal)
-        const word = col.text.slice(piece.start, piece.end)
-        if (fresh.length) {
-          piece.alts = fresh
-          piece.p = fresh.find((a) => same(a.text, word))?.p ?? Math.min(piece.p, fresh.at(-1)!.p)
-        }
+        onChange()
       }
-      const alts = await engine.probe(theirs, before, signal)
+    // Last resort, one model call per word, for pieces never tied to a token. Without ids, a word outside the other side's
+    // top five only gets a bound.
+    for (const piece of col.pieces) {
+      if (signal.aborted) return
+      if (!needs(piece) || piece.run || !/[A-Za-z0-9]/.test(col.text.slice(piece.start, piece.end))) continue
+      const alts = await engine.probe(theirs, col.text.slice(0, piece.start), signal)
       if (alts.length) piece.other = alts
       onChange()
     }
@@ -240,17 +271,11 @@ export function createColumnView(root: HTMLElement, withKnob: boolean) {
     title.textContent = col.title
     root.classList.toggle("live", col.streaming || col.probing)
     root.classList.toggle("steer", col.side === "steer")
-    const changed = col.pieces.filter((p) => {
-      const inf = influenceOf(p, col.text)
-      return !!inf && (inf.kind === "changed" || (inf.kind !== "chance" && inf.lift >= 1))
-    }).length
-    state.textContent = col.streaming
-      ? `writing${col.pieces.some((p) => p.other) ? ` · ${changed} shifted so far` : ""}`
-      : col.probing
-        ? `comparing with the other side · ${changed} shifted`
-        : col.error
-          ? ""
-          : `${countWords(col.text)} words${col.pieces.some((p) => p.other) ? ` · ${changed} shifted by these values` : ""}`
+    const checked = col.pieces.filter((p) => p.other && !p.unscorable && p.p !== undefined)
+    const changed = checked.filter((p) => isShifted(influenceOf(p, col.text))).length
+    const tally = checked.length ? ` · ${changed} of ${checked.length} tokens shifted` : ""
+    state.textContent = col.streaming ? `writing${tally}` : col.probing ? `comparing with the other side${tally}` : col.error ? "" : `${countWords(col.text)} words${tally}`
+    state.title = "A token is a word or part of a word, the unit the model writes in. Shifted: the other side's values would have made a different token the first choice, or made this one at least twice as likely."
     error.hidden = !col.error
     error.textContent = col.error ?? ""
 
@@ -265,13 +290,20 @@ export function createColumnView(root: HTMLElement, withKnob: boolean) {
     shownText = col.text
     if (!col.text && col.streaming && !text.querySelector(".waiting")) text.innerHTML = `<span class="waiting">Waiting for the model</span>`
 
-    text.querySelectorAll<HTMLElement>(".tok:not([data-checked])").forEach((el) => {
-      const inf = influenceOf(col.pieces[Number(el.dataset.k)], col.text)
-      if (!inf) return
-      el.dataset.checked = "1"
-      el.classList.toggle("flip", inf.kind === "changed")
-      el.classList.toggle("boost", inf.kind === "boosted")
-      el.style.setProperty("--lift", Math.max(0, Math.min(4, inf.lift)).toFixed(2))
+    // Every token is restyled from its current comparison, so purple disappears when a comparison is cleared or replaced.
+    text.querySelectorAll<HTMLElement>(".tok").forEach((el) => {
+      const piece = col.pieces[Number(el.dataset.k)]
+      const inf = influenceOf(piece, col.text)
+      const key = inf ? `${inf.kind}:${inf.lift.toFixed(2)}:${inf.approximate}` : piece?.unscorable ? "x" : ""
+      if (el.dataset.key === key) return
+      el.dataset.key = key
+      el.classList.toggle("flip", inf?.kind === "changed")
+      el.classList.toggle("boost", inf?.kind === "boosted")
+      el.classList.toggle("approx", !!inf?.approximate)
+      el.classList.toggle("unscorable", !!piece?.unscorable)
+      if (inf) el.style.setProperty("--lift", inf.approximate ? "2" : Math.max(0, Math.min(4, inf.lift)).toFixed(2))
+      else el.style.removeProperty("--lift")
+      if (piece?.p !== undefined) el.style.setProperty("--u", (1 - piece.p).toFixed(3))
     })
 
     const cut = reveal === null ? col.text.length : cutAfter(col.text, reveal)

@@ -1,8 +1,8 @@
 import { countWords, createColumnView, cutAfter, influenceOf, newColumn, probeColumn, runColumn, truncateColumn, type Column, type Influence } from "./column.ts"
-import { DEFAULT_TEMPERATURE, EXAMPLES, geminiEngine, simEngine, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
+import { DEFAULT_TEMPERATURE, EXAMPLES, geminiEngine, simEngine, systemPromptOf, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
-import { addCustomValue, allValues, type Value, MAX_PER_SIDE, nameOf, removeCustomValue, SIDE_COLORS, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
+import { addCustomValue, allValues, type Value, MAX_PER_SIDE, nameOf, removeCustomValue, valueOf, SIDE_COLORS, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
 type Side = "a" | "b"
@@ -24,8 +24,24 @@ const loadBar = $("load-bar")
 const hud = $("steer-hud")
 const steerInput = $<HTMLInputElement>("steer")
 
-type Ui = { prompt: string; example: number; a: ValueId[]; b: ValueId[]; strength: Strength; view: View; steer: number; highlight: Highlight; temperature: number; amplify: number }
-const TUNE_DEFAULTS = { highlight: "values" as Highlight, temperature: DEFAULT_TEMPERATURE, amplify: 0 }
+type Check = "live" | "after"
+type Ui = {
+  prompt: string
+  example: number
+  a: ValueId[]
+  b: ValueId[]
+  strength: Strength
+  view: View
+  steer: number
+  highlight: Highlight
+  temperature: number
+  amplify: number
+  /** When the purple is measured: while writing (slower writing) or once the replies are done (faster overall). */
+  check: Check
+  /** Fixed sampling seed for repeatable runs; empty for a fresh random run each time. */
+  seed: string
+}
+const TUNE_DEFAULTS = { highlight: "values" as Highlight, temperature: DEFAULT_TEMPERATURE, amplify: 0, check: "live" as Check, seed: "" }
 const first = EXAMPLES[0]
 const ui: Ui = { prompt: first.prompt, example: 0, a: [first.b], b: [first.a], strength: "firm", view: "compare", steer: 0.5, ...TUNE_DEFAULTS, ...loadUi() }
 
@@ -105,13 +121,18 @@ function blendOf(w = ui.steer) {
 /** A request with the current tuning. In side-by-side view, amplification pushes each side away from the other's values. */
 function requestOf(prompt: string, side: Side | "steer", w = ui.steer): WriteRequest {
   const base = { prompt, strength: ui.strength, temperature: ui.temperature }
-  if (side === "steer") return { ...base, values: [], blend: blendOf(w), amplify: 0 }
+  if (side === "steer") return { ...base, values: [], blend: blendOf(w), amplify: 0, seed: seedOf() }
   const values = side === "a" ? ui.a : ui.b
   const against = side === "a" ? ui.b : ui.a
   const amplify = engine.kind === "local" && (values.length || against.length) ? ui.amplify : 0
   // With an in-browser model, each side is checked against the other's values as it writes, so the purple appears live.
-  const live = engine.kind === "local" && ui.view === "compare" && ui.highlight === "values" && !amplify
-  return { ...base, values, against, amplify, live }
+  const live = engine.kind === "local" && ui.view === "compare" && ui.highlight === "values" && ui.check === "live" && !amplify
+  return { ...base, values, against, amplify, live, seed: seedOf() }
+}
+
+function seedOf() {
+  const n = Number.parseInt(ui.seed, 10)
+  return Number.isFinite(n) ? n : undefined
 }
 
 function names(ids: ValueId[]) {
@@ -139,7 +160,7 @@ function run() {
   const sides: (Side | "steer")[] = ui.view === "steer" ? ["steer"] : ["a", "b"]
   output.classList.toggle("two", sides.length === 2)
   slots = sides.map((side) => mountSlot(newColumn(side, titleOf(side), requestOf(prompt, side))))
-  const jobs = slots.map(({ col }) => runColumn(col, tidy(engine.write(col.request, signal)), signal, paint, col.side === "steer" ? ui.steer : undefined))
+  const jobs = slots.map(({ col }) => runColumn(col, tidy(engine.write(col.request, signal)), signal, paintSoon, col.side === "steer" ? ui.steer : undefined))
   paint()
   loadDrivers(prompt, signal)
   settle(jobs, signal)
@@ -165,7 +186,7 @@ function runSide(side: Side) {
       other.reprobeFrom = 0
     }
   paint()
-  settle([runColumn(col, tidy(engine.write(col.request, signal)), signal, paint)], signal)
+  settle([runColumn(col, tidy(engine.write(col.request, signal)), signal, paintSoon)], signal)
 }
 
 function mountSlot(col: Column, replace?: HTMLElement): Slot {
@@ -198,8 +219,19 @@ async function compareWords(signal: AbortSignal) {
   for (const { col } of slots) {
     if (signal.aborted || col.error) continue
     const against = requestOf(col.request.prompt, col.side === "a" ? "b" : "a")
-    await probeColumn(col, engine, { ...against, values: col.side === "a" ? ui.b : ui.a }, signal, paint)
+    await probeColumn(col, engine, { ...against, values: col.side === "a" ? ui.b : ui.a }, signal, paintSoon)
   }
+}
+
+let paintQueued = false
+/** Streaming and checking change the columns many times a frame; draw at most once per frame. */
+function paintSoon() {
+  if (paintQueued) return
+  paintQueued = true
+  requestAnimationFrame(() => {
+    paintQueued = false
+    paint()
+  })
 }
 
 function paint() {
@@ -208,6 +240,7 @@ function paint() {
     view.update(col, col.side === "steer" ? reveal : null, more)
   }
   output.classList.toggle("scrubbed", reveal !== null)
+  $("export").hidden = !slots.length || slots.some((s) => s.col.streaming || s.col.probing || !s.col.text)
   paintHint()
 }
 
@@ -219,6 +252,60 @@ function scheduleRerun(side?: Side) {
     if (side) return runSide(side)
     run()
   }, RERUN_MS)
+}
+
+/* Study export */
+
+declare const __BUILD__: string
+
+/**
+ * Everything needed to report or reproduce the run on screen: build, model, settings, the exact system prompts, and every
+ * token with its id and both sides' probabilities. Repeat runs per condition (with different seeds) to separate value
+ * effects from sampling variation.
+ */
+function exportRun() {
+  const tokens = (col: Column) =>
+    col.pieces.map((p) => {
+      const inf = influenceOf(p, col.text)
+      return {
+        text: col.text.slice(p.start, p.end),
+        tokenId: p.tokenId ?? null,
+        scorable: !p.unscorable && p.p !== undefined,
+        p: p.p ?? null,
+        top: p.alts ?? null,
+        otherP: inf?.pOther ?? null,
+        otherPIsUpperBound: inf?.bound ?? null,
+        otherTop: p.other ?? null,
+        kind: inf?.kind ?? null,
+        log2Lift: inf && !inf.approximate ? inf.lift : null,
+        amplified: p.amplified ?? null,
+      }
+    })
+  const record = {
+    tool: "Value Monitor",
+    build: typeof __BUILD__ === "string" ? __BUILD__ : "dev",
+    exportedAt: new Date().toISOString(),
+    engine: engine.label,
+    model: engine.kind === "local" ? read(STORE.local) : engine.kind === "gemini" ? read(STORE.model) : "sim",
+    settings: { temperature: ui.temperature, topP: 0.9, strength: ui.strength, amplify: ui.amplify, measure: ui.check, seed: seedOf() ?? null, view: ui.view },
+    prompt: ui.prompt,
+    interpretation:
+      "Per token: probability of the written token under each side's system prompt, given the same reply text so far. This is a conditional comparison of next-token distributions; it does not by itself show that the values caused the reply's overall direction. Compare response-level outcomes across repeated seeded runs for that.",
+    sides: slots.map(({ col }) => ({
+      side: col.side,
+      title: col.title,
+      values: col.request.values.map((id) => ({ id, name: nameOf(id), principle: valueOf(id).principle })),
+      systemPrompt: systemPromptOf(col.request),
+      reply: col.text,
+      tokens: tokens(col),
+    })),
+  }
+  const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" })
+  const a = document.createElement("a")
+  a.href = URL.createObjectURL(blob)
+  a.download = `value-monitor-${new Date().toISOString().replace(/[:.]/g, "-")}.json`
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
 
 /* The steered reply: Spaceship-style cursor and future steering */
@@ -301,7 +388,7 @@ function grow(mode: "extend" | "regrow", only?: Slot) {
     if (mode === "extend" && engine.kind === "local") col.reprobeFrom = Math.min(col.reprobeFrom ?? Infinity, col.pieces.length)
     col.request = col.side === "steer" ? requestOf(col.request.prompt, "steer") : requestOf(col.request.prompt, col.side)
     const request = { ...col.request, more: mode === "extend" }
-    jobs.push(runColumn(col, tidy(engine.write(request, signal, col.text), col.text), signal, paint, col.side === "steer" ? ui.steer : undefined))
+    jobs.push(runColumn(col, tidy(engine.write(request, signal, col.text), col.text), signal, paintSoon, col.side === "steer" ? ui.steer : undefined))
   }
   // Writing resumes at the cursor, and the cursor rides along with the new text; the dot in the text marks where steering changed.
   reveal = null
@@ -405,51 +492,87 @@ function onTokenClick(e: MouseEvent) {
   const side = slot.col.side
   const mineLabel = side === "steer" ? "probability" : `${side.toUpperCase()}'s values${piece.amplified ? ` ×${piece.amplified}` : ""}`
   const otherLabel = side === "a" ? "B's values" : "A's values"
-  const mine = inf?.mine ?? [...(piece.alts ?? []), { text: chosenText, p: piece.p }].filter((a, i, l) => l.findIndex((b) => b.text === a.text) === i).sort((a, b) => b.p - a.p)
+  const written: Alt = { text: chosenText, p: piece.p, id: piece.tokenId }
+  // Tokens are matched by id when known, so " The" and "the" stay apart.
+  const key = (a: Alt) => (a.id !== undefined ? `#${a.id}` : `"${a.text}`)
+  const mine = inf?.mine ?? [...(piece.alts ?? []), written].filter((a, i, l) => l.findIndex((b) => key(b) === key(a)) === i).sort((a, b) => b.p - a.p)
   const rows: Alt[] = [...mine]
-  for (const a of inf?.other ?? []) if (!rows.some((r) => r.text === a.text)) rows.push({ text: a.text, p: 0 })
-  const pOf = (list: Alt[] | undefined, t: string) => list?.find((a) => a.text === t)?.p
+  for (const a of inf?.other ?? []) if (!rows.some((r) => key(r) === key(a))) rows.push({ ...a, p: 0 })
+  const isWritten = (a: Alt) => key(a) === key(written)
+  const pOf = (list: Alt[] | undefined, a: Alt) => list?.find((b) => key(b) === key(a))?.p
   const two = !!inf
-  const cell = (p: number | undefined, cls: string) =>
-    p === undefined ? `<span class="pop-cell none">–</span>` : `<span class="pop-cell ${cls}"><span class="pop-bar"><i style="width:${Math.max(2, p * 100)}%"></i></span><span class="pop-p">${pct(p)}</span></span>`
+  const approx = !!inf?.approximate
+  const rankOf = (list: Alt[] | undefined, a: Alt) => {
+    const i = list?.findIndex((b) => key(b) === key(a)) ?? -1
+    return i < 0 ? undefined : i + 1
+  }
+  const cell = (list: Alt[] | undefined, a: Alt, cls: string) => {
+    if (approx) {
+      const r = rankOf(list, a)
+      return r === undefined ? `<span class="pop-cell none">–</span>` : `<span class="pop-cell ${cls}"><span class="pop-p">#${r}</span></span>`
+    }
+    const p = pOf(list, a)
+    // The written token outside the other side's top five has only an upper bound there.
+    if (p === undefined && two && cls === "without" && isWritten(a) && inf!.bound) return `<span class="pop-cell ${cls}"><span class="pop-p">&lt; ${pct(inf!.pOther ?? 0)}</span></span>`
+    return p === undefined ? `<span class="pop-cell none">–</span>` : `<span class="pop-cell ${cls}"><span class="pop-bar"><i style="width:${Math.max(2, p * 100)}%"></i></span><span class="pop-p">${pct(p)}</span></span>`
+  }
+  const note = piece.unscorable
+    ? `<p class="pop-plain">Not scored: this piece of text isn't exactly one of the model's tokens (it spans several, or cleanup changed it), so no single probability describes it.</p>`
+    : inf
+      ? `<p class="pop-plain ${inf.kind}">${explain(inf, side as Side)}</p>`
+      : ""
+  const foot = approx
+    ? "Amplified writing (experimental) blends two estimates from each side's top five, so only rankings are shown, not probabilities. "
+    : two
+      ? "Top five tokens for each, from the same model reading the same reply up to this point. – means not in that top five. "
+      : ""
   popover.classList.toggle("two", two)
   popover.innerHTML = `
     <p class="pop-head">${piece.forced ? "You picked" : "The model wrote"} <b>${shown(chosenText)}</b></p>
-    ${inf ? `<p class="pop-plain ${inf.kind}">${explain(inf, side as Side)}</p>` : ""}
+    ${note}
     <div class="pop-grid${two ? " two" : ""}">
       <span class="pop-colhead"></span><span class="pop-colhead">${mineLabel}</span>${two ? `<span class="pop-colhead">${otherLabel}</span>` : ""}
       ${rows
         .map(
-          (a, i) => `<button type="button" class="pop-row${a.text === chosenText ? " picked" : ""}" data-i="${i}" ${a.text === chosenText || !canBranch ? "disabled" : ""} title="${a.text === chosenText ? "The word in the reply" : "Rewrite the rest of the reply starting from this word"}">
-            <span class="pop-word">${shown(a.text)}</span>${cell(pOf(mine, a.text), "with")}${two ? cell(pOf(inf!.other, a.text), "without") : ""}
+          (a, i) => `<button type="button" class="pop-row${isWritten(a) ? " picked" : ""}" data-i="${i}" ${isWritten(a) || !canBranch ? "disabled" : ""} title="${isWritten(a) ? "The token in the reply" : "Rewrite the rest of the reply starting from this token"}">
+            <span class="pop-word">${shown(a.text)}</span>${cell(mine, a, "with")}${two ? cell(inf!.other, a, "without") : ""}
           </button>`,
         )
         .join("")}
     </div>
-    <p class="pop-foot">${two ? "Top five words for each, from the same model reading the same reply up to this word. – means not in that top five. " : ""}${canBranch ? "Click a word to rewrite from here." : busy ? "Rewriting is available once the replies finish." : ""}</p>`
+    <p class="pop-foot">${foot}${canBranch ? "Click a token to rewrite from here." : busy ? "Rewriting is available once the replies finish." : ""}</p>`
   popover.hidden = false
   positionPopover(tok)
   popover.querySelectorAll<HTMLButtonElement>("button[data-i]").forEach((b) =>
     b.addEventListener("click", () => {
       closePopover()
       const a = rows[Number(b.dataset.i)]
-      branch(slot, k, { text: a.text, p: pOf(mine, a.text) ?? 0 })
+      branch(slot, k, { text: a.text, p: pOf(mine, a) ?? 0 })
     }),
   )
 }
 
-/** One plain sentence on what the two distributions say about this word. */
+/**
+ * One plain sentence on what the two distributions say about this token. It describes a conditional comparison (this
+ * token, given the same text so far, under each side's values), not what caused the reply as a whole.
+ */
 function explain(inf: Influence, side: Side) {
   const me = side.toUpperCase()
   const them = side === "a" ? "B" : "A"
   const w = `<b>${shown(inf.word)}</b>`
-  const times = inf.lift >= 1 ? ` (${Math.round(2 ** inf.lift * 10) / 10}× likelier)` : ""
-  const theirs = inf.pOther === undefined ? "under " + pct(inf.other.at(-1)?.p ?? 0) : pct(inf.pOther)
+  if (inf.approximate) {
+    if (inf.kind === "changed") return `With ${me}'s values amplified, ${w} was the first choice; with ${them}'s values the first choice was <b>${shown(inf.other[0].text)}</b>.`
+    if (inf.kind === "chance") return `${w} was the #${inf.rank} option here, picked by chance.`
+    return `Both sides' values ranked ${w} first here.`
+  }
+  const ratio = Math.round(2 ** inf.lift * 10) / 10
+  const times = inf.lift >= 1 ? ` (${inf.bound ? "at least " : ""}${ratio}× likelier)` : ""
+  const theirs = inf.bound ? `under ${pct(inf.pOther ?? 0)}` : pct(inf.pOther ?? 0)
   if (inf.kind === "changed")
-    return `${me}'s values changed the model's first choice here. With ${them}'s values it would most likely write <b>${shown(inf.other[0].text)}</b> (${pct(inf.other[0].p)}); with ${me}'s, ${w} went from ${theirs} to ${pct(inf.pMine)}${times}.`
-  if (inf.kind === "boosted") return `Same first choice with either side's values, but ${me}'s made ${w} more likely: ${theirs} → ${pct(inf.pMine)}${times}.`
+    return `Given the same text so far, ${me}'s values change the model's first choice here. With ${them}'s values it would most likely write <b>${shown(inf.other[0].text)}</b> (${pct(inf.other[0].p)}); with ${me}'s, ${w} goes from ${theirs} to ${pct(inf.pMine)}${times}.`
+  if (inf.kind === "boosted") return `Same first choice under either side's values, but ${me}'s make ${w} more likely: ${theirs} → ${pct(inf.pMine)}${times}.`
   if (inf.kind === "chance")
-    return `This word was the model's #${inf.rank} option, picked by chance (the model samples, it doesn't always take the top word). Its first choice with ${me}'s values was <b>${shown(inf.mine[0].text)}</b>.`
+    return `This token was the model's #${inf.rank} option, picked by chance (the model samples, it doesn't always take the top choice). Its first choice with ${me}'s values was <b>${shown(inf.mine[0].text)}</b>.`
   return `The values made little difference here: ${theirs} with ${them}'s, ${pct(inf.pMine)} with ${me}'s.`
 }
 
@@ -484,7 +607,7 @@ function branch(slot: Slot, k: number, alt: Alt) {
   slots = slots.map((s) => (s === slot ? next : s))
   reveal = null
   paint()
-  settle([runColumn(col, tidy(engine.write(col.request, signal, col.text), col.text), signal, paint, col.side === "steer" ? ui.steer : undefined)], signal)
+  settle([runColumn(col, tidy(engine.write(col.request, signal, col.text), col.text), signal, paintSoon, col.side === "steer" ? ui.steer : undefined)], signal)
 }
 
 function pct(p: number) {
@@ -708,6 +831,8 @@ function listOf(items: string[]) {
 
 /* Tuning: what to highlight, temperature, and value amplification */
 
+$("export").addEventListener("click", exportRun)
+
 function bindTune() {
   const panel = $("tune")
   const btn = $("tune-btn")
@@ -729,6 +854,19 @@ function bindTune() {
         if (ui.highlight === "values" && controller && !slots.some((s) => s.col.streaming || s.col.probing)) compareWords(controller.signal)
       }),
     )
+  $("check")
+    .querySelectorAll<HTMLButtonElement>("button")
+    .forEach((b) =>
+      b.addEventListener("click", () => {
+        ui.check = b.dataset.v as Check
+        saveUi()
+        paintTune()
+        if (slots.length && ui.view === "compare") run()
+      }),
+    )
+  const seed = $<HTMLInputElement>("seed")
+  seed.addEventListener("input", () => ((ui.seed = seed.value.replace(/[^\d]/g, "")), saveUi(), paintTune()))
+  seed.addEventListener("change", () => slots.length && run())
   const temp = $<HTMLInputElement>("temperature")
   const amp = $<HTMLInputElement>("amplify")
   temp.addEventListener("input", () => ((ui.temperature = Number(temp.value)), saveUi(), paintTune()))
@@ -736,7 +874,7 @@ function bindTune() {
   temp.addEventListener("change", () => slots.length && run())
   amp.addEventListener("change", () => slots.length && ui.view === "compare" && run())
   $("tune-reset").addEventListener("click", () => {
-    const rerun = ui.temperature !== TUNE_DEFAULTS.temperature || ui.amplify !== TUNE_DEFAULTS.amplify
+    const rerun = ui.temperature !== TUNE_DEFAULTS.temperature || ui.amplify !== TUNE_DEFAULTS.amplify || ui.check !== TUNE_DEFAULTS.check || ui.seed !== TUNE_DEFAULTS.seed
     Object.assign(ui, TUNE_DEFAULTS)
     saveUi()
     updateEngineUi()
@@ -754,6 +892,18 @@ function paintTune() {
       b.disabled = !local
     })
   $("highlight-note").textContent = local ? "Value influence compares each side's words with the other side's values (side-by-side view)." : "Word-level highlights need an in-browser model, which shares its probabilities."
+  $("check")
+    .querySelectorAll<HTMLButtonElement>("button")
+    .forEach((b) => {
+      b.setAttribute("aria-checked", String(b.dataset.v === ui.check))
+      b.disabled = !local || ui.highlight !== "values"
+    })
+  $("check-note").textContent =
+    ui.check === "live"
+      ? "Purple fills in as the replies are written. Writing runs at roughly half speed, since the model also checks each stretch."
+      : "Replies write at full speed; purple fills in right after, in one pass per side."
+  const seedEl = $<HTMLInputElement>("seed")
+  if (seedEl.value !== ui.seed) seedEl.value = ui.seed
   $<HTMLInputElement>("temperature").value = String(ui.temperature)
   $("temperature-out").textContent = ui.temperature.toFixed(1)
   const amp = $<HTMLInputElement>("amplify")
@@ -761,9 +911,9 @@ function paintTune() {
   amp.disabled = !local
   $("amplify-out").textContent = ui.amplify > 0 ? `×${ui.amplify}` : "off"
   $("amplify-note").textContent = local
-    ? "Side by side: pushes each reply's words further from what the other side's values would say. Each word takes two model calls, so it writes more slowly."
+    ? "Experimental. Pushes each reply further from what the other side's values would say. It blends estimates from each side's top five words, so its purple shows rankings, not probabilities. Each word takes two model calls."
     : "Needs an in-browser model: it works from the model's word probabilities."
-  $("tune-btn").classList.toggle("active", ui.temperature !== TUNE_DEFAULTS.temperature || (local && ui.amplify > 0))
+  $("tune-btn").classList.toggle("active", ui.temperature !== TUNE_DEFAULTS.temperature || (local && ui.amplify > 0) || !!ui.seed || ui.check !== TUNE_DEFAULTS.check)
 }
 
 /** One quiet line explaining what can be done with the replies on screen. */
@@ -773,9 +923,9 @@ function paintHint() {
   hint.hidden = !slots.length
   const parts: string[] = []
   if (ui.view === "steer") parts.push(`Drag <span class="key-knob"></span> back to rewrite from there, or click it at the end for more · underline color shows the A–B blend that wrote each stretch`)
-  else if (local && ui.highlight === "values") parts.push(`<span class="key-lift">purple</span> = how much likelier this side's values made a word than the other side's · <span class="key-flip">colored</span> = they changed its first choice`)
+  else if (local && ui.highlight === "values") parts.push(`<span class="key-lift">purple</span> = how much likelier this side's values make a token than the other side's, given the same text so far · <span class="key-flip">colored</span> = they change its first choice`)
   if (local && ui.highlight === "doubt") parts.push(`<span class="key-shade">shaded</span> = where the model hesitated`)
-  if (local) parts.push("click any word for its probabilities")
+  if (local) parts.push("click any token for its probabilities")
   hint.innerHTML = parts.join(" · ")
 }
 

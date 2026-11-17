@@ -53,7 +53,16 @@ The **Tune** button opens three settings:
 
 * **Two sides.** Tap a value once for side A, twice for side B, again to clear. A side with no values is the plain baseline. Changing one side rewrites only that side.
 * **Personalities.** Under *Personalities* are dispositions you can give either side instead of (or as well as) values: Yes-man, Devil's advocate, Staunch denier, Wishy-washy, Alarmist, Cheerleader, Cynic and Bureaucrat.
-* **Side by side.** Each side writes its own reply. With an in-browser model, every word is checked against the other side's values as the reply is written: every few tokens, the new tokens are fed back through the model under the other side's prompt, and a small hook in the model's worker records the probabilities at each step. The purple fills in a moment behind the text. The checks share the model with the writing, so replies write at roughly half speed. Words are shaded by how many times likelier this side's values made them. A second model reads both replies and lists how B differs from A.
+* **Side by side.** Each side writes its own reply. With an in-browser model, every token is compared with the other side's values: the reply's own tokens are fed back through the model under the other side's prompt, and a hook in the model's worker records, at each step, the exact probability of the written token and the top five. Both sides' numbers come from that same computation. Tokens are shaded by how many times likelier this side's values made them. Under *Tune → Measure influence*, choose **While writing** (purple fills in every 24 tokens; writing runs at roughly half speed) or **After writing** (full-speed writing, then one pass per side). A second model reads both replies and lists how B differs from A.
+
+### What the purple does and doesn't show
+
+Purple is a *conditional* comparison: given exactly the text written so far, how likely was this token under each side's system prompt. It does not by itself show that the values caused the reply's overall direction, and a single run mixes value effects with sampling chance. For study use:
+
+* Set a **seed** (Tune) to make a run repeatable on the same model and settings, and run several seeds per condition.
+* **Export this run** (below the replies) saves the build, model, settings, both system prompts, and every token with its id and both sides' probabilities, as JSON.
+* Compare response-level outcomes across runs (for the examples, the first-word verdict) alongside the token view.
+* Pieces that aren't exactly one token (or that the display cleanup changed) aren't scored. Value amplification is experimental: it blends estimates from each side's top five, so it shows rankings, not probabilities.
 * **Steer** (after the Spaceship IDE's future steering and real-time generation). One reply, with a cursor that rides along as it's written. The slider blends A's and B's values for everything after the cursor: let go and the future is rewritten at once, even mid-sentence. Drag the cursor back to steer from earlier, or click it at the end to keep writing. Each stretch is underlined in the blend color that wrote it, with a dot where the steering changed.
 * **Tidy.** Replies are cleaned as they stream (no list numbers, markdown or line breaks).
 
