@@ -369,3 +369,10 @@ body.scrubbing .knob { transition: none; }
 .study-row .link { font-size: 12px; color: var(--muted); }
 .study-row .link:hover { color: var(--ink); }
 #seed { width: 100%; font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--hair); border-radius: 8px; background: var(--paper, transparent); color: var(--ink); }
+
+/* "Replies start with Yes or No": a quiet switch beside the example link */
+.yesno { display: inline-flex; align-items: center; gap: 7px; margin-left: 18px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; transition: color .2s; }
+.yesno:hover, .yesno[aria-checked="true"] { color: var(--ink); }
+.yesno-box { width: 13px; height: 13px; border: 1.5px solid currentColor; border-radius: 4px; display: grid; place-items: center; transition: background .2s, border-color .2s; }
+.yesno[aria-checked="true"] .yesno-box { background: var(--ink); border-color: var(--ink); }
+.yesno[aria-checked="true"] .yesno-box::after { content: ""; width: 6px; height: 3.5px; border: solid var(--paper, #fff); border-width: 0 0 1.6px 1.6px; transform: translateY(-1px) rotate(-45deg); }

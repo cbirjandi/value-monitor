@@ -1,5 +1,5 @@
 import type { WebWorkerMLCEngine } from "@mlc-ai/web-llm"
-import { DEFAULT_TEMPERATURE, systemPromptOf, type Alt, type Engine, type Measured, type Piece, type Run, type TokenView, type WriteRequest } from "./engine.ts"
+import { askOf, DEFAULT_TEMPERATURE, systemPromptOf, YES_NO, type Alt, type Engine, type Measured, type Piece, type Run, type TokenView, type WriteRequest } from "./engine.ts"
 import { valueOf, type ValueId } from "./values.ts"
 
 type Family = "qwen" | "chatml" | "llama" | "gemma" | "phi" | "mistral" | "zephyr"
@@ -70,6 +70,10 @@ export function loadModel(id: string, onProgress: (p: Progress) => void): Promis
 const EXAMPLE_ASK = "My coworker keeps taking credit for my ideas in meetings. What should I do?"
 const EXAMPLE_REPLY =
   "Start by sending a short recap email after you share an idea, so there is a record with your name on it. If it keeps happening, raise it with your coworker directly and calmly. Bring in your manager only if that doesn't work."
+/** The same example in Yes-or-No form, so small models see the format they are asked for. */
+const EXAMPLE_ASK_YES_NO = `My coworker keeps taking credit for my ideas in meetings. Should I report them to HR?\n\n${YES_NO}`
+const EXAMPLE_REPLY_YES_NO =
+  "No. Start by sending a short recap email after you share an idea, so there is a record with your name on it. If it keeps happening, raise it with your coworker directly before bringing in HR."
 
 type Turn = { role: "user" | "assistant"; text: string }
 
@@ -131,8 +135,13 @@ const KEEP_GOING = "Please continue your answer with two or three more sentences
  */
 function conversationOf(req: WriteRequest, prefix: string, withExample: boolean): { turns: Turn[]; open: string } {
   const turns: Turn[] = [
-    ...(withExample ? ([{ role: "user", text: EXAMPLE_ASK }, { role: "assistant", text: EXAMPLE_REPLY }] as Turn[]) : []),
-    { role: "user", text: req.prompt },
+    ...(withExample
+      ? ([
+          { role: "user", text: req.yesNo ? EXAMPLE_ASK_YES_NO : EXAMPLE_ASK },
+          { role: "assistant", text: req.yesNo ? EXAMPLE_REPLY_YES_NO : EXAMPLE_REPLY },
+        ] as Turn[])
+      : []),
+    { role: "user", text: askOf(req) },
   ]
   if (req.more && prefix.trim()) return { turns: [...turns, { role: "assistant", text: prefix.trim() }, { role: "user", text: KEEP_GOING }], open: "" }
   return { turns, open: prefix }

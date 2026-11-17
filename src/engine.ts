@@ -22,7 +22,15 @@ export type WriteRequest = {
   live?: boolean
   /** Fixes sampling, so a run can be repeated. */
   seed?: number
+  /** Every reply opens with a one-word verdict, Yes or No, so the two sides' positions can be compared directly. */
+  yesNo?: boolean
 }
+
+/** Added to the question when replies must open with a verdict. Both sides get the same words, so it doesn't favor either. */
+export const YES_NO = "Start your reply with Yes or No, then give your two strongest reasons."
+
+/** The question as the model sees it. */
+export const askOf = (req: Pick<WriteRequest, "prompt" | "yesNo">) => (req.yesNo ? `${req.prompt.trim()}\n\n${YES_NO}` : req.prompt)
 
 export const DEFAULT_TEMPERATURE = 0.7
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
@@ -122,8 +130,8 @@ export function geminiEngine(key: string, model: string): Engine {
     kind: "gemini",
     async *write(req, signal, prefix = "") {
       const user = prefix
-        ? `${req.prompt}\n\n---\nYour reply so far is below. Continue it from its last word${req.more ? " with the next two or three sentences" : ""}. Output only the new words that come next; never repeat any of it.\n\n${prefix}`
-        : req.prompt
+        ? `${askOf(req)}\n\n---\nYour reply so far is below. Continue it from its last word${req.more ? " with the next two or three sentences" : ""}. Output only the new words that come next; never repeat any of it.\n\n${prefix}`
+        : askOf(req)
       let head: string | undefined = prefix ? "" : undefined
       for await (const text of streamText({ key, model, system: systemPromptOf(req), user, temperature: req.temperature ?? DEFAULT_TEMPERATURE, signal })) {
         if (head === undefined) {

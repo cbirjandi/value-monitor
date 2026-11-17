@@ -1,5 +1,5 @@
 import { countWords, createColumnView, cutAfter, influenceOf, newColumn, probeColumn, runColumn, truncateColumn, type Column, type Influence } from "./column.ts"
-import { DEFAULT_TEMPERATURE, EXAMPLES, geminiEngine, simEngine, systemPromptOf, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
+import { DEFAULT_TEMPERATURE, EXAMPLES, askOf, geminiEngine, simEngine, systemPromptOf, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
 import { addCustomValue, allValues, type Value, MAX_PER_SIDE, nameOf, removeCustomValue, valueOf, SIDE_COLORS, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
@@ -40,10 +40,12 @@ type Ui = {
   check: Check
   /** Fixed sampling seed for repeatable runs; empty for a fresh random run each time. */
   seed: string
+  /** Every reply must open with Yes or No. */
+  yesNo: boolean
 }
 const TUNE_DEFAULTS = { highlight: "values" as Highlight, temperature: DEFAULT_TEMPERATURE, amplify: 0, check: "live" as Check, seed: "" }
 const first = EXAMPLES[0]
-const ui: Ui = { prompt: first.prompt, example: 0, a: [first.b], b: [first.a], strength: "firm", view: "compare", steer: 0.5, ...TUNE_DEFAULTS, ...loadUi() }
+const ui: Ui = { prompt: first.prompt, example: 0, a: [first.b], b: [first.a], strength: "firm", view: "compare", steer: 0.5, yesNo: true, ...TUNE_DEFAULTS, ...loadUi() }
 
 let progress: Progress | null = null
 let engine: Engine = engineFromStorage()
@@ -55,6 +57,10 @@ let slots: Slot[] = []
 let reveal: number | null = null
 const driverCache = new Map<string, Driver[]>()
 const comparisons = new Map<string, string[]>()
+
+// A question saved from the older examples carried its own format line ("Begin with Approve or Reject..."); the app adds
+// the Yes-or-No line itself now, so swap in the current wording of that example.
+if (/Begin with \w|Give me a straight answer first|Answer Yes or No first/.test(ui.prompt) && EXAMPLES[ui.example]) ui.prompt = EXAMPLES[ui.example].prompt
 
 let showPersonas = false
 const known = (id: ValueId) => allValues().some((v) => v.id === id)
@@ -120,7 +126,7 @@ function blendOf(w = ui.steer) {
 
 /** A request with the current tuning. In side-by-side view, amplification pushes each side away from the other's values. */
 function requestOf(prompt: string, side: Side | "steer", w = ui.steer): WriteRequest {
-  const base = { prompt, strength: ui.strength, temperature: ui.temperature }
+  const base = { prompt, strength: ui.strength, temperature: ui.temperature, yesNo: ui.yesNo }
   if (side === "steer") return { ...base, values: [], blend: blendOf(w), amplify: 0, seed: seedOf() }
   const values = side === "a" ? ui.a : ui.b
   const against = side === "a" ? ui.b : ui.a
@@ -256,6 +262,12 @@ function scheduleRerun(side?: Side) {
 
 /* Study export */
 
+/** The reply's opening verdict, when it has one. */
+function verdictOf(text: string) {
+  const m = text.trim().match(/^(yes|no)\b/i)
+  return m ? (m[1].toLowerCase() === "yes" ? "Yes" : "No") : null
+}
+
 declare const __BUILD__: string
 
 /**
@@ -289,6 +301,8 @@ function exportRun() {
     model: engine.kind === "local" ? read(STORE.local) : engine.kind === "gemini" ? read(STORE.model) : "sim",
     settings: { temperature: ui.temperature, topP: 0.9, strength: ui.strength, amplify: ui.amplify, measure: ui.check, seed: seedOf() ?? null, view: ui.view },
     prompt: ui.prompt,
+    question: askOf({ prompt: ui.prompt, yesNo: ui.yesNo }),
+    verdicts: Object.fromEntries(slots.map(({ col }) => [col.side, verdictOf(col.text)])),
     interpretation:
       "Per token: probability of the written token under each side's system prompt, given the same reply text so far. This is a conditional comparison of next-token distributions; it does not by itself show that the values caused the reply's overall direction. Compare response-level outcomes across repeated seeded runs for that.",
     sides: slots.map(({ col }) => ({
@@ -832,6 +846,16 @@ function listOf(items: string[]) {
 /* Tuning: what to highlight, temperature, and value amplification */
 
 $("export").addEventListener("click", exportRun)
+
+const yesNoEl = $("yesno")
+const paintYesNo = () => yesNoEl.setAttribute("aria-checked", String(ui.yesNo))
+paintYesNo()
+yesNoEl.addEventListener("click", () => {
+  ui.yesNo = !ui.yesNo
+  saveUi()
+  paintYesNo()
+  scheduleRerun()
+})
 
 function bindTune() {
   const panel = $("tune")
