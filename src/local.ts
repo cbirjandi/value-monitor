@@ -147,6 +147,51 @@ const samplingOf = (req: WriteRequest) => ({ temperature: req.temperature ?? DEF
 /** Longest an amplified reply runs per request, in words. */
 const AMPLIFIED_MAX_TOKENS = 90
 const MAX_TOKENS = 160
+
+type Stretch = { done: boolean; wantIds?: boolean; ids?: number[] }
+type View = { p: number; top: Alt[]; text: string }
+
+/**
+ * Matches replayed tokens to the pieces shown on the page by where each starts in the text, not by order, since a piece
+ * can hold several tokens (or text held back by the model). Each piece gets the view of the first token that starts in it.
+ */
+function alignByText(pieces: Piece[], views: View[]): (View | undefined)[] {
+  const starts: number[] = []
+  let at = 0
+  for (const v of views) {
+    starts.push(at)
+    at += v.text.length
+  }
+  let from = 0
+  return pieces.map((piece) => {
+    const start = from
+    from += piece.text.length
+    if (!piece.text.trim()) return undefined
+    const k = starts.findIndex((s) => s >= start && s < from)
+    if (k >= 0) return views[k]
+    // No token starts inside (decoding drifted by a character): take the token covering this piece's start.
+    let j = -1
+    starts.forEach((s, i) => s <= start && (j = i))
+    return j >= 0 ? views[j] : undefined
+  })
+}
+
+/** Sends a message to the model's worker and waits for its answer (or gives up after `ms`). */
+function ask<T>(msg: Record<string, unknown>, field: string, ms: number): Promise<T | undefined> {
+  const worker = loaded?.worker
+  if (!worker) return Promise.resolve(undefined)
+  const nonce = Math.random().toString(36).slice(2)
+  return new Promise((resolve) => {
+    const take = (m: { vm: string; [k: string]: unknown }) => {
+      if (m.nonce !== nonce) return
+      fromWorker.delete(take)
+      resolve(m[field] as T)
+    }
+    fromWorker.add(take)
+    setTimeout(() => (fromWorker.delete(take), resolve(undefined)), ms)
+    worker.postMessage({ ...msg, nonce })
+  })
+}
 /** Tokens written between live checks: shorter shows influence sooner, longer wastes less time re-reading the prompt. */
 const LIVE_STRETCH = 8
 
@@ -250,7 +295,7 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
       worker.postMessage({ vm: "force", ids, temperature: req.temperature ?? DEFAULT_TEMPERATURE })
       await llm.completions.create({ prompt: promptOf(req, prefix), stream: false, max_tokens: ids.length, ignore_eos: true, temperature: req.temperature ?? DEFAULT_TEMPERATURE, top_p: 1 })
       const nonce = Math.random().toString(36).slice(2)
-      const out = await new Promise<{ id: number; p: number; top: Alt[] }[]>((resolve) => {
+      const out = await new Promise<{ id: number; p: number; top: Alt[]; text?: string }[]>((resolve) => {
         const take = (msg: { vm: string; [k: string]: unknown }) => {
           if (msg.vm !== "collected" || msg.nonce !== nonce) return
           fromWorker.delete(take)
@@ -261,14 +306,14 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
         setTimeout(() => (fromWorker.delete(take), resolve([])), 8000)
         worker.postMessage({ vm: "collect", nonce })
       })
-      return out.map((s) => ({ p: s.p, top: s.top }))
+      return out.map((s) => ({ p: s.p, top: s.top, text: s.text ?? "" }))
     } finally {
       release()
     }
   }
 
   /** Streams one stretch of reply from `prefix`, at most `maxTokens` long, tagging each token with its id. */
-  async function* stretch(llm: Llm, req: WriteRequest, prefix: string, maxTokens: number, signal: AbortSignal, status = { done: true }): AsyncIterable<Piece> {
+  async function* stretch(llm: Llm, req: WriteRequest, prefix: string, maxTokens: number, signal: AbortSignal, status: Stretch = { done: true }): AsyncIterable<Piece> {
     const release = await turn()
     const stop = () => llm.interruptGenerate()
     signal.addEventListener("abort", stop)
@@ -319,6 +364,8 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
         }
       }
       finished = true
+      // Ask the worker for the exact tokens of this stretch while the model is still ours, so no other request mixes in.
+      if (status.wantIds) status.ids = await ask<number[]>({ vm: "sampled" }, "ids", 3000)
     } finally {
       // The reader may stop early (the reply is long enough); stop the model too, so the next request isn't kept waiting.
       if (!finished) stop()
@@ -355,10 +402,10 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
       for (let written = 0; written < MAX_TOKENS && !signal.aborted; ) {
         const before = text
         const pieces: Piece[] = []
-        const status = { done: true }
+        const status: Stretch = { done: true, wantIds: true }
         // Each piece carries a promise of the other side's view, settled once its stretch has been replayed.
-        let settle: (views: { p: number; top: Alt[] }[]) => void = () => {}
-        const views = new Promise<{ p: number; top: Alt[] }[]>((r) => (settle = r))
+        let settle: (views: (View | undefined)[]) => void = () => {}
+        const views = new Promise<(View | undefined)[]>((r) => (settle = r))
         for await (const piece of stretch(llm, req, text, LIVE_STRETCH, signal, status)) {
           const k = pieces.length
           pieces.push(piece)
@@ -366,9 +413,21 @@ export function localEngine(id: string, judge: Engine | "self" | null, onProgres
           yield { ...piece, later: views.then((v) => v[k]) }
         }
         written += pieces.length
-        const ids = pieces.map((p) => p.id)
-        if (pieces.length && ids.every((i) => i !== undefined)) replayIds(theirs, ids as number[], signal, before, true).then(settle, () => settle([]))
-        else settle([])
+        const ids = status.ids ?? []
+        if (pieces.length && ids.length) {
+          replayIds(theirs, ids, signal, before, true)
+            .then((views) => {
+              if (views.length < ids.length) console.info(`[value-monitor] live check returned ${views.length} of ${ids.length} tokens`)
+              settle(alignByText(pieces, views))
+            })
+            .catch((e) => {
+              console.warn("[value-monitor] live check failed", e)
+              settle([])
+            })
+        } else {
+          console.info("[value-monitor] live check skipped: no token ids for this stretch")
+          settle([])
+        }
         if (status.done || pieces.length < LIVE_STRETCH) break
       }
     },

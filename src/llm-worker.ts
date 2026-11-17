@@ -16,6 +16,8 @@ type Force = { ids: number[]; i: number; temperature: number; out: { p: number; 
 const handler = new WebWorkerMLCEngineHandler()
 let force: Force | null = null
 let reporting = false
+/** Every token sampled since reporting was last switched on: the stretch just written. */
+let sampled: number[] = []
 
 const processor: LogitProcessor = {
   processLogits(logits) {
@@ -43,7 +45,10 @@ const processor: LogitProcessor = {
   },
   processSampledToken(token) {
     if (force) force.i++
-    else if (reporting) self.postMessage({ vm: "tok", id: token })
+    else if (reporting) {
+      sampled.push(token)
+      self.postMessage({ vm: "tok", id: token })
+    }
   },
   resetState() {},
 }
@@ -58,19 +63,36 @@ handler.setLogitProcessorRegistry(new (class extends Map<string, LogitProcessor>
   }
 })())
 
-function decode(id: number): string {
+function decodeIds(ids: number[]): string {
   const pipelines = (handler.engine as unknown as { loadedModelIdToPipeline?: Map<string, { tokenizer: { decode(ids: Int32Array): string } }> }).loadedModelIdToPipeline
   const pipeline = pipelines ? [...pipelines.values()][0] : undefined
-  return pipeline ? pipeline.tokenizer.decode(Int32Array.of(id)) : ""
+  return pipeline ? pipeline.tokenizer.decode(Int32Array.from(ids)) : ""
+}
+const decode = (id: number) => decodeIds([id])
+
+/** The text each token adds, decoded in context so multi-byte characters and leading spaces come out right. */
+function piecesOf(ids: number[]): string[] {
+  const out: string[] = []
+  let before = ""
+  for (let k = 0; k < ids.length; k++) {
+    const now = decodeIds(ids.slice(0, k + 1))
+    out.push(now.startsWith(before) ? now.slice(before.length) : decode(ids[k]))
+    before = now
+  }
+  return out
 }
 
 self.onmessage = (event: MessageEvent) => {
   const msg = event.data
   if (msg && typeof msg === "object" && "vm" in msg) {
-    if (msg.vm === "report") reporting = !!msg.on
+    if (msg.vm === "report") {
+      if (msg.on && !reporting) sampled = []
+      reporting = !!msg.on
+    } else if (msg.vm === "sampled") self.postMessage({ vm: "sampled", nonce: msg.nonce, ids: sampled.slice() })
     else if (msg.vm === "force") force = { ids: msg.ids, i: 0, temperature: msg.temperature, out: [] }
     else if (msg.vm === "collect") {
-      const out = (force?.out ?? []).map((s, k) => ({ id: force!.ids[k], p: s.p, top: s.top.map(([id, p]) => ({ text: decode(id), p })) }))
+      const texts = piecesOf(force?.ids.slice(0, force.out.length) ?? [])
+      const out = (force?.out ?? []).map((s, k) => ({ id: force!.ids[k], text: texts[k], p: s.p, top: s.top.map(([id, p]) => ({ text: decode(id), p })) }))
       force = null
       self.postMessage({ vm: "collected", nonce: msg.nonce, out })
     }
