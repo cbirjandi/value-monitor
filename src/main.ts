@@ -301,7 +301,6 @@ function exportRun() {
     model: engine.kind === "local" ? read(STORE.local) : engine.kind === "gemini" ? read(STORE.model) : "sim",
     settings: { temperature: ui.temperature, topP: 0.9, strength: ui.strength, amplify: ui.amplify, measure: ui.check, seed: seedOf() ?? null, view: ui.view },
     prompt: ui.prompt,
-    question: askOf({ prompt: ui.prompt, yesNo: ui.yesNo }),
     verdicts: Object.fromEntries(slots.map(({ col }) => [col.side, verdictOf(col.text)])),
     interpretation:
       "Per token: probability of the written token under each side's system prompt, given the same reply text so far. This is a conditional comparison of next-token distributions; it does not by itself show that the values caused the reply's overall direction. Compare response-level outcomes across repeated seeded runs for that.",
@@ -310,6 +309,7 @@ function exportRun() {
       title: col.title,
       values: col.request.values.map((id) => ({ id, name: nameOf(id), principle: valueOf(id).principle })),
       systemPrompt: systemPromptOf(col.request),
+      question: askOf(col.request),
       reply: col.text,
       tokens: tokens(col),
     })),
@@ -950,7 +950,12 @@ function paintHint() {
   else if (local && ui.highlight === "values") parts.push(`<span class="key-lift">purple</span> = how much likelier this side's values make a token than the other side's, given the same text so far · <span class="key-flip">colored</span> = they change its first choice`)
   if (local && ui.highlight === "doubt") parts.push(`<span class="key-shade">shaded</span> = where the model hesitated`)
   if (local) parts.push("click any token for its probabilities")
+  // Safety-tuned models tend to answer the question on its merits whatever personality they are given.
+  const model = LOCAL_MODELS.find((m) => m.id === read(STORE.local))
+  if (local && model && !model.steerable && [...ui.a, ...ui.b].some((id) => valueOf(id).persona))
+    parts.push(`<b>${model.name}</b> is safety-tuned and often ignores personalities; a <button type="button" class="link" data-open-settings>Hermes model</button> plays them far more faithfully`)
   hint.innerHTML = parts.join(" · ")
+  hint.querySelector("[data-open-settings]")?.addEventListener("click", () => $("settings-btn").click())
 }
 
 /* Engines and settings */

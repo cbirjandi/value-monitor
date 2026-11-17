@@ -29,8 +29,24 @@ export type WriteRequest = {
 /** Added to the question when replies must open with a verdict. Both sides get the same words, so it doesn't favor either. */
 export const YES_NO = "Start your reply with Yes or No, then give your two strongest reasons."
 
-/** The question as the model sees it. */
-export const askOf = (req: Pick<WriteRequest, "prompt" | "yesNo">) => (req.yesNo ? `${req.prompt.trim()}\n\n${YES_NO}` : req.prompt)
+/**
+ * The question as the model sees it. The side's values (and personality) are restated right after the question, because
+ * small models weigh the text just before their answer far more than a system prompt read earlier. Each side's reminder
+ * has the same shape, so neither is favored; only the values differ.
+ */
+export function askOf(req: Pick<WriteRequest, "prompt" | "yesNo" | "values" | "blend">) {
+  const lines = [req.prompt.trim()]
+  if (req.blend) lines.push("Answer according to the weighted values in your instructions.")
+  else if (req.values?.length) {
+    const persona = req.values.some((id) => valueOf(id).persona)
+    lines.push(
+      `Answer as an assistant ${persona ? "with this personality and these values" : "guided by these values"}, without naming them:\n` +
+        req.values.map((id) => `- ${valueOf(id).principle}`).join("\n"),
+    )
+  }
+  if (req.yesNo) lines.push(YES_NO)
+  return lines.join("\n\n")
+}
 
 export const DEFAULT_TEMPERATURE = 0.7
 /** A phrase from the prompt that a scoring model says pulls a reply toward or against a value. */
