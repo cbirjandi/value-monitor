@@ -1,6 +1,6 @@
 import data from "./data.json"
 import { ApiError, generateJson, streamText } from "./gemini.ts"
-import { allValues, valueOf, type Strength, type ValueId } from "./values.ts"
+import { allValues, valueOf, type Strength, type ValueId, usable } from "./values.ts"
 
 /**
  * `values` empty means a plain reply with no guidance. `more` asks the model to keep going past a reply it may consider finished.
@@ -95,7 +95,7 @@ export type Engine = {
   compare?(prompt: string, a: { text: string; values: ValueId[] }, b: { text: string; values: ValueId[] }, signal: AbortSignal): Promise<string[]>
 }
 
-export const EXAMPLES = data.dilemmas as { title: string; a: ValueId; b: ValueId; prompt: string; ra: string; rb: string }[]
+export const EXAMPLES = (data.dilemmas as { title: string; a: ValueId; b: ValueId; prompt: string; ra: string; rb: string }[]).filter((d) => usable([d.a, d.b]))
 
 const HOW: Record<Strength, string> = {
   gentle: "Let them shape the reply where they fit naturally.",

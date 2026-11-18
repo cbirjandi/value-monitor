@@ -10,8 +10,15 @@ export const MAX_CHOSEN = 3
 const CUSTOM_STORE = "vm-custom-values"
 
 const BUILT_IN = data.values as Value[]
-/** Personalities: dispositions rather than values, steered the same way. */
-export const PERSONAS = data.personas as Value[]
+/**
+ * Personalities: dispositions rather than values, steered the same way. Switched off for now; set to true to bring back
+ * their chips and their two examples (definitions are kept in data.json).
+ */
+export const SHOW_PERSONAS = false
+export const PERSONAS = SHOW_PERSONAS ? (data.personas as Value[]) : []
+const PERSONA_IDS = new Set((data.personas as Value[]).map((v) => v.id))
+/** Whether an example uses only values that are switched on. */
+export const usable = (ids: ValueId[]) => SHOW_PERSONAS || !ids.some((id) => PERSONA_IDS.has(id))
 let custom: Value[] = loadCustom()
 
 export const allValues = () => [...BUILT_IN, ...custom, ...PERSONAS]

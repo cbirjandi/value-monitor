@@ -66,6 +66,13 @@ let showPersonas = false
 const known = (id: ValueId) => allValues().some((v) => v.id === id)
 ui.a = ui.a.filter(known)
 ui.b = ui.b.filter(known)
+// A saved example that is no longer offered (a personality match-up) falls back to the first one.
+if (ui.example >= EXAMPLES.length || (!ui.a.length && !ui.b.length && !EXAMPLES.some((d) => d.prompt === ui.prompt))) {
+  ui.example = 0
+  ui.prompt = first.prompt
+  ui.a = [first.b]
+  ui.b = [first.a]
+}
 renderChips()
 bindAddForm()
 renderStrength()
@@ -649,9 +656,11 @@ function renderChips() {
   chipsEl.innerHTML =
     values.map(chip).join("") +
     `<button type="button" class="chip add" id="add-value">+ Add your own</button>` +
-    `<button type="button" class="persona-toggle" id="persona-toggle" aria-expanded="${open}">Personalities <span aria-hidden="true">${open ? "−" : "+"}</span></button>` +
-    (open ? `<div class="persona-row">${personas.map(chip).join("")}</div>` : "")
-  $("persona-toggle").addEventListener("click", () => {
+    (personas.length
+      ? `<button type="button" class="persona-toggle" id="persona-toggle" aria-expanded="${open}">Personalities <span aria-hidden="true">${open ? "−" : "+"}</span></button>` +
+        (open ? `<div class="persona-row">${personas.map(chip).join("")}</div>` : "")
+      : "")
+  $("persona-toggle")?.addEventListener("click", () => {
     showPersonas = !open
     if (!showPersonas && personas.some((v) => sideOf(v.id))) showPersonas = true
     renderChips()

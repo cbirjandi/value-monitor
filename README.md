@@ -52,7 +52,7 @@ The **Tune** button opens three settings:
 ## How it works
 
 * **Two sides.** Tap a value once for side A, twice for side B, again to clear. A side with no values is the plain baseline. Changing one side rewrites only that side.
-* **Personalities.** Under *Personalities* are dispositions you can give either side instead of (or as well as) values: Yes-man, Devil's advocate, Staunch denier, Wishy-washy, Alarmist, Cheerleader, Cynic and Bureaucrat.
+* **Personalities** (Yes-man, Devil's advocate and others) are switched off for now. Their definitions and two examples are kept in `src/data.json`; set `SHOW_PERSONAS = true` in `src/values.ts` to bring them back.
 * **Yes or No first.** Every reply opens with a one-word verdict (the switch under the question, on by default). The app adds the same line to the question for both sides, so the two positions can be compared at a glance, and the first token carries the clearest value signal. Exported runs record each side's verdict.
 * **Side by side.** Each side writes its own reply. With an in-browser model, every token is compared with the other side's values: the reply's own tokens are fed back through the model under the other side's prompt, and a hook in the model's worker records, at each step, the exact probability of the written token and the top five. Both sides' numbers come from that same computation. Tokens are shaded by how many times likelier this side's values made them. Under *Tune → Measure influence*, choose **While writing** (purple fills in every 24 tokens; writing runs at roughly half speed) or **After writing** (full-speed writing, then one pass per side). A second model reads both replies and lists how B differs from A.
 
