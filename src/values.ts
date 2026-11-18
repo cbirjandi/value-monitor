@@ -47,7 +47,7 @@ export function removeCustomValue(id: ValueId) {
 export const SIDE_COLORS = { a: "#e5532d", b: "#2f6fdb" }
 export const MAX_PER_SIDE = 3
 
-/** The top priorities of a constitution copied from Constitution Lab, matched by name. */
+
 export function topValuesFromLab(markdown: string): ValueId[] {
   const byName = (name: string) => allValues().find((v) => v.name.toLowerCase() === name.toLowerCase())?.id
   return [...markdown.matchAll(/^\s*\d+\.\s+\*\*(.+?)\.\*\*/gm)]

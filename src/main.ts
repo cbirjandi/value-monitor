@@ -2,7 +2,7 @@ import { countWords, createColumnView, cutAfter, influenceOf, newColumn, probeCo
 import { DEFAULT_TEMPERATURE, EXAMPLES, askOf, geminiEngine, simEngine, systemPromptOf, tidy, type Alt, type Driver, type Engine, type WriteRequest } from "./engine.ts"
 import { defaultModel, listModels } from "./gemini.ts"
 import { hasWebGPU, LOCAL_MODELS, localEngine, type Progress } from "./local.ts"
-import { addCustomValue, allValues, type Value, MAX_PER_SIDE, nameOf, removeCustomValue, valueOf, SIDE_COLORS, topValuesFromLab, type Strength, type ValueId } from "./values.ts"
+import { addCustomValue, allValues, type Value, MAX_PER_SIDE, nameOf, removeCustomValue, valueOf, SIDE_COLORS, type Strength, type ValueId } from "./values.ts"
 
 type EngineKind = Engine["kind"]
 type Side = "a" | "b"
@@ -301,7 +301,7 @@ function exportRun() {
       }
     })
   const record = {
-    tool: "Value Monitor",
+    tool: "Constitutional AI Test",
     build: typeof __BUILD__ === "string" ? __BUILD__ : "dev",
     exportedAt: new Date().toISOString(),
     engine: engine.label,
@@ -841,7 +841,7 @@ function autosize() {
 function renderEmpty() {
   $("diff").hidden = true
   output.classList.remove("two")
-  output.innerHTML = `<div class="empty-state"><p>Give each side its values, then press <b>Run</b>.</p><p class="sub">Side by side writes one reply per side. Steer writes one reply you can push between them as it's written.</p></div>`
+  output.innerHTML = `<div class="empty-state"><p>Give each side its values, then press <b>Run</b>.</p></div>`
 }
 
 function setStatus(text: string) {
@@ -1097,16 +1097,6 @@ function bindSettings() {
   $("model-btn").addEventListener("click", open)
   $("load-models").addEventListener("click", findModels)
   keyInput.addEventListener("change", () => keyInput.value.trim() && !modelSel.value && findModels())
-  $("lab-import").addEventListener("click", () => {
-    const top = topValuesFromLab($<HTMLTextAreaElement>("lab-md").value)
-    $("lab-status").textContent = top.length ? `Side B now holds ${listOf(top.map((id) => nameOf(id)))}.` : "No priorities found. Paste the whole Markdown."
-    if (!top.length) return
-    ui.a = ui.a.filter((id) => !top.includes(id))
-    ui.b = top
-    saveUi()
-    paintChips()
-    renderPrompt()
-  })
   dialog.addEventListener("close", () => {
     if (dialog.returnValue !== "save") return
     write(STORE.engine, kind)

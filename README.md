@@ -1,4 +1,4 @@
-# Value Monitor
+# Constitutional AI Test
 
 Give two AI replies different values (say, Privacy against Security) and see how far the values move what gets written, side by side or steered between them as the reply is written.
 

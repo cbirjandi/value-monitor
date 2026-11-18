@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Value Monitor</title>
+    <title>Constitutional AI Test</title>
     <meta name="description" content="Pick the values an AI should hold, then watch each sentence of its reply honor or give them up." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Crect x='8' y='9' width='3' height='14' rx='1.5' fill='%23e5532d'/%3E%3Crect x='14.5' y='13' width='3' height='10' rx='1.5' fill='%23fff'/%3E%3Crect x='21' y='6' width='3' height='17' rx='1.5' fill='%23fff'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -13,7 +13,7 @@
   </head>
   <body>
     <header class="top">
-      <span class="brand">Value Monitor</span>
+      <span class="brand">Constitutional AI Test</span>
       <div class="top-right">
         <button type="button" id="model-btn" class="model"><i class="dot"></i><span id="model-label">Sim mode</span></button>
         <button type="button" id="settings-btn" class="icon-btn" aria-label="Settings">
@@ -163,12 +163,6 @@
           </div>
           <small id="models-status"></small>
         </div>
-        <details>
-          <summary>Import from Constitution Lab</summary>
-          <textarea id="lab-md" rows="5" placeholder="Paste the Markdown from Constitution Lab's Copy Markdown button"></textarea>
-          <button type="button" id="lab-import" class="btn">Use its top four values</button>
-          <small id="lab-status"></small>
-        </details>
         <div class="actions">
           <button value="cancel" class="btn quiet">Cancel</button>
           <button value="save" id="save" class="btn solid">Save</button>
